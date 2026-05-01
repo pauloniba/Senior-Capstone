@@ -24,6 +24,45 @@ export async function provisionDefaultDevices(query, userId) {
       [userId, name, deviceUid]
     )
   }
+
+  await query(
+    `INSERT INTO device_thresholds (device_id, sensor_type, warning_min, warning_max, critical_min, critical_max)
+     SELECT
+       d.id,
+       CASE
+         WHEN d.device_uid LIKE '%dev-attic-01' THEN 'temperature'
+         WHEN d.device_uid LIKE '%dev-basement-01' THEN 'moisture'
+         WHEN d.device_uid LIKE '%dev-kitchen-01' THEN 'vibration'
+         ELSE 'custom'
+       END AS sensor_type,
+       CASE
+         WHEN d.device_uid LIKE '%dev-basement-01' THEN 28
+         ELSE NULL
+       END AS warning_min,
+       CASE
+         WHEN d.device_uid LIKE '%dev-attic-01' THEN 27
+         WHEN d.device_uid LIKE '%dev-kitchen-01' THEN 0.5
+         ELSE NULL
+       END AS warning_max,
+       CASE
+         WHEN d.device_uid LIKE '%dev-basement-01' THEN 20
+         ELSE NULL
+       END AS critical_min,
+       CASE
+         WHEN d.device_uid LIKE '%dev-attic-01' THEN 30
+         WHEN d.device_uid LIKE '%dev-kitchen-01' THEN 1
+         ELSE NULL
+       END AS critical_max
+     FROM devices d
+     WHERE d.user_id = $1
+       AND (
+         d.device_uid LIKE '%dev-attic-01'
+         OR d.device_uid LIKE '%dev-basement-01'
+         OR d.device_uid LIKE '%dev-kitchen-01'
+       )
+     ON CONFLICT (device_id, sensor_type) DO NOTHING`,
+    [userId]
+  )
 }
 
 /**

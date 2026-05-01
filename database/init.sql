@@ -1,4 +1,4 @@
--- Home Sensor database (PostgreSQL)
+-- Home Sensor database (PostgreSQL + TimescaleDB)
 -- Runs once when the Postgres data volume is first created (docker-entrypoint-initdb.d).
 -- If you change this file, reset the volume: docker compose down -v && docker compose up -d
 
@@ -30,17 +30,103 @@ CREATE TABLE IF NOT EXISTS devices (
 
 CREATE INDEX IF NOT EXISTS devices_user_id_idx ON devices (user_id);
 
+CREATE TABLE IF NOT EXISTS device_thresholds (
+    id           SERIAL PRIMARY KEY,
+    device_id    INTEGER NOT NULL REFERENCES devices (id) ON DELETE CASCADE,
+    sensor_type  VARCHAR(64) NOT NULL,
+    warning_min  DOUBLE PRECISION,
+    warning_max  DOUBLE PRECISION,
+    critical_min DOUBLE PRECISION,
+    critical_max DOUBLE PRECISION,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (device_id, sensor_type)
+);
+
+CREATE INDEX IF NOT EXISTS device_thresholds_device_idx
+    ON device_thresholds (device_id);
+
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 CREATE TABLE IF NOT EXISTS sensor_readings (
-    id          SERIAL PRIMARY KEY,
+    id          BIGSERIAL,
     device_id   INTEGER NOT NULL REFERENCES devices (id) ON DELETE CASCADE,
     sensor_type VARCHAR(64) NOT NULL,
     value       DOUBLE PRECISION NOT NULL,
     unit        VARCHAR(32),
-    recorded_at TIMESTAMPTZ DEFAULT NOW()
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Hypertables require unique indexes (including PK) to include the partition column.
+-- We do not rely on id uniqueness in app code, so drop legacy PK if present.
+ALTER TABLE sensor_readings DROP CONSTRAINT IF EXISTS sensor_readings_pkey;
+
+SELECT create_hypertable(
+    'sensor_readings',
+    'recorded_at',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
 );
 
 CREATE INDEX IF NOT EXISTS sensor_readings_device_time_idx
     ON sensor_readings (device_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS sensor_readings_type_time_idx
+    ON sensor_readings (sensor_type, recorded_at DESC);
+
+ALTER TABLE sensor_readings
+SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'device_id,sensor_type',
+    timescaledb.compress_orderby = 'recorded_at DESC'
+);
+
+SELECT add_compression_policy('sensor_readings', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_retention_policy('sensor_readings', INTERVAL '45 days', if_not_exists => TRUE);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_readings_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket(INTERVAL '1 hour', recorded_at) AS bucket,
+    device_id,
+    sensor_type,
+    AVG(value) AS avg_value,
+    MIN(value) AS min_value,
+    MAX(value) AS max_value,
+    COUNT(*)::BIGINT AS samples
+FROM sensor_readings
+GROUP BY bucket, device_id, sensor_type
+WITH NO DATA;
+
+SELECT add_continuous_aggregate_policy(
+    'sensor_readings_hourly',
+    start_offset => INTERVAL '7 days',
+    end_offset => INTERVAL '5 minutes',
+    schedule_interval => INTERVAL '15 minutes',
+    if_not_exists => TRUE
+);
+SELECT add_retention_policy('sensor_readings_hourly', INTERVAL '365 days', if_not_exists => TRUE);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_readings_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket(INTERVAL '1 day', recorded_at) AS bucket,
+    device_id,
+    sensor_type,
+    AVG(value) AS avg_value,
+    MIN(value) AS min_value,
+    MAX(value) AS max_value,
+    COUNT(*)::BIGINT AS samples
+FROM sensor_readings
+GROUP BY bucket, device_id, sensor_type
+WITH NO DATA;
+
+SELECT add_continuous_aggregate_policy(
+    'sensor_readings_daily',
+    start_offset => INTERVAL '180 days',
+    end_offset => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour',
+    if_not_exists => TRUE
+);
+SELECT add_retention_policy('sensor_readings_daily', INTERVAL '3 years', if_not_exists => TRUE);
 
 -- Test account (password: password123) — bcrypt hash generated for bcryptjs
 INSERT INTO users (email, password, first_name, last_name, display_name)
@@ -71,3 +157,42 @@ CROSS JOIN (VALUES
 ) AS v(name, uid)
 WHERE u.email = 'test@homesense.local'
 ON CONFLICT (device_uid) DO NOTHING;
+
+INSERT INTO device_thresholds (device_id, sensor_type, warning_min, warning_max, critical_min, critical_max)
+SELECT
+    d.id,
+    CASE
+        WHEN d.device_uid LIKE '%dev-attic-01' THEN 'temperature'
+        WHEN d.device_uid LIKE '%dev-basement-01' THEN 'moisture'
+        WHEN d.device_uid LIKE '%dev-kitchen-01' THEN 'vibration'
+        ELSE 'custom'
+    END AS sensor_type,
+    CASE
+        WHEN d.device_uid LIKE '%dev-attic-01' THEN NULL
+        WHEN d.device_uid LIKE '%dev-basement-01' THEN 28
+        WHEN d.device_uid LIKE '%dev-kitchen-01' THEN NULL
+        ELSE NULL
+    END AS warning_min,
+    CASE
+        WHEN d.device_uid LIKE '%dev-attic-01' THEN 27
+        WHEN d.device_uid LIKE '%dev-basement-01' THEN NULL
+        WHEN d.device_uid LIKE '%dev-kitchen-01' THEN 0.5
+        ELSE NULL
+    END AS warning_max,
+    CASE
+        WHEN d.device_uid LIKE '%dev-attic-01' THEN NULL
+        WHEN d.device_uid LIKE '%dev-basement-01' THEN 20
+        WHEN d.device_uid LIKE '%dev-kitchen-01' THEN NULL
+        ELSE NULL
+    END AS critical_min,
+    CASE
+        WHEN d.device_uid LIKE '%dev-attic-01' THEN 30
+        WHEN d.device_uid LIKE '%dev-basement-01' THEN NULL
+        WHEN d.device_uid LIKE '%dev-kitchen-01' THEN 1
+        ELSE NULL
+    END AS critical_max
+FROM devices d
+WHERE d.device_uid LIKE '%dev-attic-01'
+   OR d.device_uid LIKE '%dev-basement-01'
+   OR d.device_uid LIKE '%dev-kitchen-01'
+ON CONFLICT (device_id, sensor_type) DO NOTHING;

@@ -218,7 +218,6 @@ function Home({ darkMode, setDarkMode }) {
                 >
                   <span>
                     {d.label}
-                    <small className="d-block text-muted">Click for chart and detailed history</small>
                     {d.alert ? (
                       <small className="d-block text-danger fw-semibold">
                         Alert: {d.alert.message}

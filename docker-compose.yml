@@ -1,7 +1,7 @@
 services:
   db:
-    # Pin major version: postgres:latest is 18+ and rejects the old /var/lib/postgresql/data-only mount layout.
-    image: postgres:16-alpine
+    # TimescaleDB on PostgreSQL 16 for time-series retention/rollups.
+    image: timescale/timescaledb:latest-pg16
     restart: always
     environment:
       POSTGRES_DB: mydatabase

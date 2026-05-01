@@ -25,6 +25,17 @@
   --theme-text-muted: #6c757d;
   --theme-input-bg: #ffffff;
   --theme-input-border: #ced4da;
+  /* iOS-like frosted glass (defaults; overridden on body.light / body.dark) */
+  --glass-bg: rgba(255, 255, 255, 0.42);
+  --glass-border: rgba(255, 255, 255, 0.55);
+  --glass-border-inner: rgba(255, 255, 255, 0.22);
+  --glass-highlight: rgba(255, 255, 255, 0.38);
+  --glass-shadow: 0 8px 32px rgba(31, 38, 135, 0.07), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --glass-blur: 24px;
+  --glass-saturate: 185%;
+  --glass-radius: 20px;
+  --btn-glass-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.14));
+  --btn-glass-border: rgba(255, 255, 255, 0.52);
 }
 
 html,
@@ -432,6 +443,15 @@ body.light {
   --theme-text-muted: #6c757d;
   --theme-input-bg: #ffffff;
   --theme-input-border: #ced4da;
+  --glass-bg: rgba(255, 255, 255, 0.38);
+  --glass-border: rgba(255, 255, 255, 0.62);
+  --glass-border-inner: rgba(255, 255, 255, 0.28);
+  --glass-highlight: rgba(255, 255, 255, 0.45);
+  --glass-shadow: 0 10px 40px rgba(31, 38, 135, 0.09), 0 1px 3px rgba(0, 0, 0, 0.05);
+  --glass-blur: 28px;
+  --glass-saturate: 195%;
+  --btn-glass-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.48), rgba(255, 255, 255, 0.12));
+  --btn-glass-border: rgba(255, 255, 255, 0.58);
   background-color: var(--theme-bg);
   color: var(--theme-text);
 }
@@ -450,6 +470,15 @@ body.dark {
   --theme-text-muted: #ced4da;
   --theme-input-bg: #3d454d;
   --theme-input-border: rgba(255, 255, 255, 0.2);
+  --glass-bg: rgba(55, 60, 68, 0.48);
+  --glass-border: rgba(255, 255, 255, 0.14);
+  --glass-border-inner: rgba(255, 255, 255, 0.06);
+  --glass-highlight: rgba(255, 255, 255, 0.14);
+  --glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --glass-blur: 32px;
+  --glass-saturate: 175%;
+  --btn-glass-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05));
+  --btn-glass-border: rgba(255, 255, 255, 0.22);
   background-color: var(--theme-bg);
   color: var(--theme-text);
 }
@@ -477,4 +506,148 @@ body.dark .gf-auth-card .btn-outline-secondary:hover {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.5);
   color: var(--theme-text);
+}
+
+/* iOS-style frosted glass — soft ambient field + vibrancy + thin specular edge */
+.app-shell {
+  background:
+    radial-gradient(1200px 520px at 12% -12%, rgba(10, 132, 255, 0.11), transparent 58%),
+    radial-gradient(900px 420px at 88% 8%, rgba(191, 90, 242, 0.09), transparent 55%),
+    radial-gradient(800px 500px at 50% 105%, rgba(52, 199, 89, 0.06), transparent 50%),
+    var(--page-bg);
+}
+
+.app-shell .card,
+.gf-auth-card,
+.dashboard .card,
+.dashboard .list-group-item,
+.dashboard .table,
+.dashboard .form-control,
+.dashboard .custom-control-label::before {
+  background: var(--glass-bg) !important;
+  border: 1px solid var(--glass-border) !important;
+  box-shadow: var(--glass-shadow) !important;
+  border-radius: var(--glass-radius) !important;
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  isolation: isolate;
+}
+
+.app-shell .card::after,
+.gf-auth-card::after,
+.dashboard .card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: inset 0 1px 0 var(--glass-border-inner);
+}
+
+.app-shell .card::before,
+.gf-auth-card::before,
+.dashboard .card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    165deg,
+    var(--glass-highlight) 0%,
+    rgba(255, 255, 255, 0.06) 38%,
+    transparent 52%
+  );
+  opacity: 0.28;
+}
+
+body.dark .app-shell .card::before,
+body.dark .gf-auth-card::before,
+body.dark .dashboard .card::before {
+  opacity: 0.18;
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(255, 255, 255, 0.03) 40%,
+    transparent 55%
+  );
+}
+
+.app-shell .card,
+.gf-auth-card,
+.dashboard .card {
+  position: relative;
+  overflow: hidden;
+}
+
+.app-shell .btn,
+.app-shell button.btn,
+.app-shell .primary-button {
+  position: relative;
+  border-radius: 999px !important;
+  border: 1px solid var(--btn-glass-border) !important;
+  background-image: var(--btn-glass-bg) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    0 4px 14px rgba(15, 23, 42, 0.1),
+    0 1px 2px rgba(0, 0, 0, 0.04) !important;
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+  transition: transform 0.18s cubic-bezier(0.25, 0.8, 0.25, 1), box-shadow 0.22s ease, filter 0.2s ease;
+}
+
+.app-shell .btn:hover,
+.app-shell button.btn:hover,
+.app-shell .primary-button:hover {
+  transform: translateY(-0.5px) scale(1.01);
+  filter: brightness(1.03);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.48),
+    0 8px 22px rgba(15, 23, 42, 0.12),
+    0 2px 4px rgba(0, 0, 0, 0.05) !important;
+}
+
+.app-shell .btn-primary {
+  background-image: linear-gradient(
+    180deg,
+    rgba(10, 132, 255, 0.95),
+    rgba(0, 122, 255, 0.88)
+  ) !important;
+  border-color: rgba(255, 255, 255, 0.28) !important;
+  color: #fff !important;
+}
+
+body.dark .app-shell .btn-primary {
+  background-image: linear-gradient(
+    180deg,
+    rgba(64, 156, 255, 0.92),
+    rgba(10, 132, 255, 0.85)
+  ) !important;
+}
+
+.app-shell .btn-outline-secondary,
+.app-shell .btn-outline-danger,
+.app-shell .btn-outline-primary {
+  background-image: var(--btn-glass-bg) !important;
+}
+
+.app-shell .btn:active,
+.app-shell button.btn:active {
+  transform: translateY(0) scale(0.99);
+  transition-duration: 0.08s;
+}
+
+.app-shell .btn-link {
+  border-radius: 0 !important;
+  border: none !important;
+  background: none !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.app-shell .btn-link:hover {
+  transform: none;
+  filter: none;
 }

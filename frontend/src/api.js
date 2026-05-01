@@ -41,12 +41,34 @@ export async function fetchDeviceOverview(userId) {
   return request(`/api/users/${userId}/devices/overview`)
 }
 
+export async function patchDevice(userId, deviceId, body) {
+  return request(`/api/users/${userId}/devices/${deviceId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
 export async function fetchAlertHistory(userId, limit = 25) {
   return request(`/api/users/${userId}/alerts?limit=${limit}`)
 }
 
 export async function fetchDeviceReadings(userId, deviceId, limit = 60) {
   return request(`/api/users/${userId}/devices/${deviceId}/readings?limit=${limit}`)
+}
+
+export async function fetchDeviceTimeseries(
+  userId,
+  deviceId,
+  { range = '1h', resolution = 'auto', metric = 'readings', limit } = {}
+) {
+  const params = new URLSearchParams()
+  params.set('range', range)
+  params.set('resolution', resolution)
+  params.set('metric', metric)
+  if (limit !== undefined && limit !== null) {
+    params.set('limit', String(limit))
+  }
+  return request(`/api/users/${userId}/devices/${deviceId}/readings/timeseries?${params.toString()}`)
 }
 
 export async function fetchProfile(userId) {
