@@ -81,3 +81,61 @@
 }
 
 /* Primary buttons stay Bootstrap blue in dark mode */
+
+.dd-ai-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.dd-ai-help {
+  margin-bottom: 0;
+}
+
+.dd-ai-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.625rem;
+}
+
+.dd-ai-input {
+  min-width: 0;
+}
+
+.dd-ai-primary-btn {
+  min-width: 9rem;
+  white-space: nowrap;
+}
+
+.dd-ai-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.dd-ai-result {
+  margin-top: 0.25rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--theme-border);
+}
+
+.dd-ai-source {
+  margin-bottom: 0.5rem;
+}
+
+.dd-ai-metrics {
+  border-top: 1px dashed var(--theme-border);
+  padding-top: 0.625rem;
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.92rem;
+}
+
+@media (max-width: 767px) {
+  .dd-ai-input-row {
+    flex-direction: column;
+  }
+
+  .dd-ai-primary-btn {
+    width: 100%;
+  }
+}

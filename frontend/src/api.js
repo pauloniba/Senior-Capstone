@@ -71,6 +71,13 @@ export async function fetchDeviceTimeseries(
   return request(`/api/users/${userId}/devices/${deviceId}/readings/timeseries?${params.toString()}`)
 }
 
+export async function fetchAgentInsights(userId, deviceId, body = {}) {
+  return request(`/api/users/${userId}/devices/${deviceId}/agent/insights`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 export async function fetchProfile(userId) {
   return request(`/api/users/${userId}/profile`)
 }

@@ -13,6 +13,8 @@ dotenv.config()
 
 const app = express()
 const PORT = process.env.PORT || 8080
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ""
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o"
 
 app.use(cors())
 app.use(express.json())
@@ -23,8 +25,11 @@ const liveReadingByDeviceId = new Map()
 const readingHistoryByDeviceId = new Map()
 /** Alert history by user id for dashboard timeline. */
 const alertHistoryByUserId = new Map()
+/** Lightweight AI conversation memory per user+device. */
+const aiConversationByDeviceKey = new Map()
 const MAX_HISTORY_POINTS = 120
 const MAX_ALERT_HISTORY = 200
+const MAX_AI_TURNS = 8
 
 const defaultReadingByUid = {
   "dev-attic-01": { value: 58.2, sensor_type: "humidity", unit: "% RH" },
@@ -426,6 +431,359 @@ function criticalBucketForRange(range) {
   if (range === "365d") return "1 month"
   if (range === "90d") return "1 day"
   return "10 minutes"
+}
+
+function average(values) {
+  if (!Array.isArray(values) || values.length === 0) return null
+  const nums = values.filter((v) => Number.isFinite(v))
+  if (nums.length === 0) return null
+  return nums.reduce((acc, n) => acc + n, 0) / nums.length
+}
+
+function classifyTrend(previousAvg, currentAvg) {
+  if (!Number.isFinite(previousAvg) || !Number.isFinite(currentAvg) || previousAvg === 0) {
+    return { direction: "flat", percentChange: null }
+  }
+  const delta = currentAvg - previousAvg
+  const pct = (delta / Math.abs(previousAvg)) * 100
+  if (Math.abs(pct) < 3) return { direction: "flat", percentChange: pct }
+  return { direction: pct > 0 ? "up" : "down", percentChange: pct }
+}
+
+function stdDev(values) {
+  const nums = values.filter((v) => Number.isFinite(v))
+  if (nums.length < 2) return null
+  const mu = average(nums)
+  const variance = nums.reduce((acc, n) => acc + (n - mu) ** 2, 0) / nums.length
+  return Math.sqrt(variance)
+}
+
+function linearForecastNext(readings, points = 6) {
+  const seq = readings
+    .map((r) => ({ t: r.recorded_at ? new Date(r.recorded_at).getTime() : null, v: Number(r.value) }))
+    .filter((r) => Number.isFinite(r.t) && Number.isFinite(r.v))
+    .slice(-points)
+  if (seq.length < 3) return { next_value: null, slope_per_hour: null, confidence: "low" }
+
+  const firstT = seq[0].t
+  const xs = seq.map((p) => (p.t - firstT) / (60 * 60 * 1000))
+  const ys = seq.map((p) => p.v)
+  const xAvg = average(xs)
+  const yAvg = average(ys)
+  const numerator = xs.reduce((acc, x, i) => acc + (x - xAvg) * (ys[i] - yAvg), 0)
+  const denominator = xs.reduce((acc, x) => acc + (x - xAvg) ** 2, 0)
+  if (!Number.isFinite(denominator) || denominator === 0) {
+    return { next_value: null, slope_per_hour: null, confidence: "low" }
+  }
+  const slope = numerator / denominator
+  const intercept = yAvg - slope * xAvg
+  const nextX = xs[xs.length - 1] + (xs[xs.length - 1] - xs[xs.length - 2] || 1)
+  const nextValue = intercept + slope * nextX
+  return {
+    next_value: Number.isFinite(nextValue) ? Number(nextValue.toFixed(3)) : null,
+    slope_per_hour: Number.isFinite(slope) ? Number(slope.toFixed(4)) : null,
+    confidence: seq.length >= 5 ? "medium" : "low"
+  }
+}
+
+function computeAdvancedAnalytics(recentReadings, dailyTrendRows, sensorType) {
+  const nowMs = Date.now()
+  const weekMs = 7 * 24 * 60 * 60 * 1000
+  const currentWeek = recentReadings
+    .filter((r) => r.recorded_at && nowMs - new Date(r.recorded_at).getTime() <= weekMs)
+    .map((r) => Number(r.value))
+    .filter((v) => Number.isFinite(v))
+  const previousWeek = dailyTrendRows
+    .slice(0, Math.max(0, dailyTrendRows.length - 7))
+    .map((d) => Number(d.avg_value))
+    .filter((v) => Number.isFinite(v))
+  const currentWeekAvg = average(currentWeek)
+  const previousWeekAvg = average(previousWeek.slice(-7))
+  const woW = classifyTrend(previousWeekAvg, currentWeekAvg)
+
+  const baseline = average(currentWeek)
+  const sigma = stdDev(currentWeek)
+  const latest = recentReadings[recentReadings.length - 1]
+  const latestValue = Number(latest?.value)
+  const zScore =
+    Number.isFinite(latestValue) && Number.isFinite(baseline) && Number.isFinite(sigma) && sigma > 0
+      ? (latestValue - baseline) / sigma
+      : null
+  const isAnomaly = Number.isFinite(zScore) ? Math.abs(zScore) >= 2 : false
+  const forecast = linearForecastNext(recentReadings, 8)
+
+  const t = String(sensorType || "").toLowerCase()
+  const leakSensitive = t === "moisture" || t === "humidity" || t === "temperature"
+  const trendFactor = woW.percentChange === null ? 0 : Math.max(0, woW.percentChange)
+  const anomalyFactor = isAnomaly ? 20 : 0
+  const forecastFactor =
+    Number.isFinite(forecast.slope_per_hour) && forecast.slope_per_hour > 0
+      ? Math.min(20, forecast.slope_per_hour * 20)
+      : 0
+  const leakRiskScoreRaw = (leakSensitive ? 35 : 20) + trendFactor + anomalyFactor + forecastFactor
+  const leakRiskScore = Math.max(0, Math.min(100, Number(leakRiskScoreRaw.toFixed(1))))
+  const leakRiskLevel = leakRiskScore >= 75 ? "high" : leakRiskScore >= 45 ? "medium" : "low"
+
+  return {
+    week_over_week: {
+      previous_avg: previousWeekAvg !== null ? Number(previousWeekAvg.toFixed(3)) : null,
+      current_avg: currentWeekAvg !== null ? Number(currentWeekAvg.toFixed(3)) : null,
+      direction: woW.direction,
+      percent_change: woW.percentChange !== null ? Number(woW.percentChange.toFixed(2)) : null
+    },
+    anomaly: {
+      is_anomaly: isAnomaly,
+      z_score: zScore !== null ? Number(zScore.toFixed(3)) : null
+    },
+    forecast,
+    leak_risk: {
+      score: leakRiskScore,
+      level: leakRiskLevel
+    }
+  }
+}
+
+function extractJsonObject(text) {
+  const raw = String(text || "").trim()
+  if (!raw) return null
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const candidate = fenced ? fenced[1].trim() : raw
+  const start = candidate.indexOf("{")
+  const end = candidate.lastIndexOf("}")
+  if (start === -1 || end === -1 || end <= start) return null
+  return candidate.slice(start, end + 1)
+}
+
+function classifyQuestionIntent(question) {
+  const q = String(question || "").trim().toLowerCase()
+  if (!q) return "summary"
+  if (["hi", "hello", "hey", "yo", "sup"].includes(q)) return "greeting"
+  if (q.length < 6) return "greeting"
+  const analyticalSignals = [
+    "trend",
+    "risk",
+    "leak",
+    "water",
+    "moisture",
+    "humidity",
+    "temperature",
+    "sensor",
+    "why",
+    "how",
+    "what does",
+    "recommend",
+    "action",
+    "next",
+    "increase",
+    "decrease"
+  ]
+  return analyticalSignals.some((k) => q.includes(k)) ? "analysis" : "analysis"
+}
+
+function aiConversationKey(userId, deviceId) {
+  return `${userId}:${deviceId}`
+}
+
+function getAiConversation(userId, deviceId) {
+  return aiConversationByDeviceKey.get(aiConversationKey(userId, deviceId)) || []
+}
+
+function pushAiConversationTurn(userId, deviceId, turn) {
+  const key = aiConversationKey(userId, deviceId)
+  const turns = aiConversationByDeviceKey.get(key) || []
+  turns.push(turn)
+  if (turns.length > MAX_AI_TURNS) {
+    turns.splice(0, turns.length - MAX_AI_TURNS)
+  }
+  aiConversationByDeviceKey.set(key, turns)
+}
+
+function buildDeterministicInsight(
+  device,
+  latestReading,
+  recentReadings,
+  dailyTrendRows,
+  question,
+  analytics = null
+) {
+  const deviceName = device?.name || uidLabel(device?.device_uid || "device")
+  const sensorType = latestReading?.sensor_type || recentReadings[recentReadings.length - 1]?.sensor_type || "sensor"
+  const unit = unitFromSensorType(sensorType, latestReading?.unit || "")
+  const values = recentReadings.map((r) => r.value).filter((v) => Number.isFinite(v))
+  const latestValue = Number.isFinite(latestReading?.value) ? latestReading.value : null
+  const stats =
+    values.length > 0
+      ? {
+          min: Math.min(...values),
+          max: Math.max(...values),
+          avg: average(values)
+        }
+      : { min: null, max: null, avg: null }
+
+  const half = Math.floor(dailyTrendRows.length / 2)
+  const firstHalf = dailyTrendRows.slice(0, half).map((r) => Number(r.avg_value))
+  const secondHalf = dailyTrendRows.slice(half).map((r) => Number(r.avg_value))
+  const trend = classifyTrend(average(firstHalf), average(secondHalf))
+  const trendText =
+    trend.percentChange === null
+      ? "Not enough historical trend data yet."
+      : trend.direction === "flat"
+        ? `Trend is stable (about ${Math.abs(trend.percentChange).toFixed(1)}% change).`
+        : `Trend is ${trend.direction === "up" ? "increasing" : "decreasing"} by about ${Math.abs(
+            trend.percentChange
+          ).toFixed(1)}% versus the prior period.`
+  const latestDelta =
+    Number.isFinite(latestValue) && Number.isFinite(stats.avg) && stats.avg !== 0
+      ? ((latestValue - stats.avg) / Math.abs(stats.avg)) * 100
+      : null
+  const latestDeltaText =
+    latestDelta === null
+      ? "Deviation from baseline cannot be computed yet."
+      : latestDelta >= 0
+        ? `Latest reading is ${latestDelta.toFixed(1)}% above the recent baseline.`
+        : `Latest reading is ${Math.abs(latestDelta).toFixed(1)}% below the recent baseline.`
+  const riskLevel =
+    trend.direction === "up" && (trend.percentChange || 0) >= 8
+      ? "high"
+      : trend.direction === "up"
+        ? "medium"
+        : "low"
+  const modeledRisk = analytics?.leak_risk?.level || riskLevel
+  const modeledScore = analytics?.leak_risk?.score
+  const answerText = question
+    ? `Question: "${question}". Based on this device's recent history, ${trendText.toLowerCase()} Current risk is ${modeledRisk}${
+        Number.isFinite(modeledScore) ? ` (score ${modeledScore}/100)` : ""
+      }.`
+    : null
+
+  return {
+    summary: `For ${deviceName}, the ${sensorType} sensor currently reads ${
+      latestValue !== null ? `${latestValue}${unit ? ` ${unit}` : ""}` : "no recent value"
+    }. ${trendText} Current risk level is ${modeledRisk}${
+      Number.isFinite(modeledScore) ? ` (score ${modeledScore}/100)` : ""
+    }.`,
+    key_points: [
+      `Recent average: ${
+        Number.isFinite(stats.avg) ? `${Number(stats.avg).toFixed(2)}${unit ? ` ${unit}` : ""}` : "n/a"
+      }`,
+      `Recent range: ${
+        Number.isFinite(stats.min) && Number.isFinite(stats.max)
+          ? `${Number(stats.min).toFixed(2)} to ${Number(stats.max).toFixed(2)}${unit ? ` ${unit}` : ""}`
+          : "n/a"
+      }`,
+      trendText,
+      latestDeltaText,
+      `Estimated risk level: ${modeledRisk}.`,
+      Number.isFinite(modeledScore) ? `Leak risk score: ${modeledScore}/100.` : "Leak risk score: n/a.",
+      analytics?.anomaly?.is_anomaly
+        ? `Anomaly detected (z-score ${analytics?.anomaly?.z_score ?? "n/a"}).`
+        : "No strong anomaly detected versus recent baseline."
+    ],
+    recommendations: [
+      "Monitor this device at least twice daily and compare with threshold alerts.",
+      "Inspect nearby pipes/fittings if readings remain elevated for 48+ hours.",
+      "Tune warning and critical thresholds to match the device's local baseline.",
+      "If risk stays medium/high for multiple days, schedule preventative maintenance.",
+      "Track whether humidity/moisture changes correlate with weather or appliance usage."
+    ],
+    answer: answerText,
+    trend: {
+      direction: trend.direction,
+      percent_change: trend.percentChange !== null ? Number(trend.percentChange.toFixed(2)) : null
+    }
+  }
+}
+
+async function generateOpenAIInsight(context, question) {
+  if (!OPENAI_API_KEY) return null
+  const prompt = {
+    role: "user",
+    content: [
+      {
+        type: "input_text",
+        text:
+          "You are an IoT monitoring analyst. Explain sensor behavior in plain language for non-technical customers. " +
+          "Focus on trend direction, risk level, and practical next steps. If water leak/moisture is trending up, call it out clearly. " +
+          "Use concrete numbers from the provided data and avoid generic repeated wording. " +
+          "Tailor the response to the exact user question and avoid repeating the same sentence templates between calls. " +
+          "Use prior conversation turns to maintain continuity and answer follow-up questions directly."
+      },
+      {
+        type: "input_text",
+        text: `Question: ${question || "Provide a proactive insight summary for this device."}`
+      },
+      {
+        type: "input_text",
+        text: `Context JSON:\n${JSON.stringify(context)}`
+      }
+    ]
+  }
+
+  const requestBody = (model) => ({
+    model,
+    temperature: 0.55,
+    input: [
+      {
+        role: "system",
+        content: [
+          {
+            type: "input_text",
+            text:
+              "Return strict JSON only with keys: summary (string), key_points (string[]), recommendations (string[]), answer (string|null), trend ({direction:'up'|'down'|'flat', percent_change:number|null}). " +
+              "Make the analysis detailed: summary should be 2-4 sentences; key_points should contain 5-7 specific data-backed bullets; recommendations should contain 4-6 concrete actions with time horizons where relevant. " +
+              "Do not reuse the same opening sentence across requests. If data hasn't materially changed, explicitly say that and provide a different perspective based on the user's question."
+          }
+        ]
+      },
+      prompt
+    ]
+  })
+  const modelsToTry = [OPENAI_MODEL, "gpt-4.1", "gpt-4o", "gpt-4o-mini"].filter(
+    (m, i, arr) => Boolean(m) && arr.indexOf(m) === i
+  )
+
+  let payload = null
+  let lastError = null
+  for (const model of modelsToTry) {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify(requestBody(model))
+    })
+    if (response.ok) {
+      payload = await response.json()
+      break
+    }
+    const text = await response.text()
+    lastError = `model=${model}: ${response.status} ${text}`
+    // Retry with a safer fallback model when model id is invalid/unavailable.
+    if (response.status === 400 || response.status === 404) continue
+    throw new Error(`OpenAI request failed: ${lastError}`)
+  }
+  if (!payload) {
+    throw new Error(`OpenAI request failed: ${lastError || "unknown error"}`)
+  }
+
+  const raw =
+    payload?.output_text ||
+    payload?.output?.flatMap((item) => item.content || []).map((c) => c.text).join("") ||
+    ""
+  if (!raw) return null
+
+  try {
+    return JSON.parse(raw)
+  } catch {
+    const extracted = extractJsonObject(raw)
+    if (!extracted) return null
+    try {
+      return JSON.parse(extracted)
+    } catch {
+      return null
+    }
+  }
 }
 
 app.get("/api/health", async (req, res) => {
@@ -1332,6 +1690,182 @@ app.get("/api/users/:userId/devices/:deviceId/readings/timeseries", async (req, 
   } catch (err) {
     console.error(err)
     return res.status(500).json({ message: "Could not load timeseries readings" })
+  }
+})
+
+/**
+ * Agentic AI: explains trends and answers device data questions.
+ */
+app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res) => {
+  if (!pool) {
+    return res.status(500).json({ message: "Database not configured" })
+  }
+
+  const userId = Number.parseInt(req.params.userId, 10)
+  const deviceId = Number.parseInt(req.params.deviceId, 10)
+  const question = String(req.body?.question || "").trim()
+  const questionIntent = classifyQuestionIntent(question)
+  if (!Number.isFinite(userId) || !Number.isFinite(deviceId)) {
+    return res.status(400).json({ message: "Invalid user id or device id" })
+  }
+
+  try {
+    const deviceRes = await query(
+      `SELECT id, name, device_uid
+       FROM devices
+       WHERE id = $1 AND user_id = $2
+       LIMIT 1`,
+      [deviceId, userId]
+    )
+    if (deviceRes.rows.length === 0) {
+      return res.status(404).json({ message: "Device not found for user" })
+    }
+    const device = deviceRes.rows[0]
+
+    const latestRes = await query(
+      `SELECT value, sensor_type, unit, recorded_at
+       FROM sensor_readings
+       WHERE device_id = $1
+       ORDER BY recorded_at DESC
+       LIMIT 1`,
+      [device.id]
+    )
+    const recentRes = await query(
+      `SELECT value, sensor_type, unit, recorded_at
+       FROM sensor_readings
+       WHERE device_id = $1
+         AND recorded_at >= NOW() - INTERVAL '7 days'
+       ORDER BY recorded_at ASC
+       LIMIT 2000`,
+      [device.id]
+    )
+    const dailyTrendRes = await query(
+      `SELECT
+         time_bucket(INTERVAL '1 day', recorded_at) AS day_bucket,
+         AVG(value) AS avg_value,
+         MIN(value) AS min_value,
+         MAX(value) AS max_value,
+         COUNT(*)::BIGINT AS samples
+       FROM sensor_readings
+       WHERE device_id = $1
+         AND recorded_at >= NOW() - INTERVAL '14 days'
+       GROUP BY day_bucket
+       ORDER BY day_bucket ASC`,
+      [device.id]
+    )
+
+    const latestReading = latestRes.rows[0]
+      ? {
+          ...latestRes.rows[0],
+          recorded_at: latestRes.rows[0].recorded_at
+            ? new Date(latestRes.rows[0].recorded_at).toISOString()
+            : null
+        }
+      : null
+    const recentReadings = recentRes.rows.map((r) => ({
+      ...r,
+      recorded_at: r.recorded_at ? new Date(r.recorded_at).toISOString() : null
+    }))
+    const dailyTrendRows = dailyTrendRes.rows.map((r) => ({
+      day_bucket: r.day_bucket ? new Date(r.day_bucket).toISOString() : null,
+      avg_value: r.avg_value !== null ? Number(r.avg_value) : null,
+      min_value: r.min_value !== null ? Number(r.min_value) : null,
+      max_value: r.max_value !== null ? Number(r.max_value) : null,
+      samples: Number.parseInt(r.samples, 10) || 0
+    }))
+
+    const context = {
+      device: {
+        id: device.id,
+        name: device.name,
+        label: device.name || uidLabel(device.device_uid),
+        device_uid: device.device_uid
+      },
+      latest_reading: latestReading,
+      recent_readings_sample: recentReadings.slice(-120),
+      daily_trend_14d: dailyTrendRows,
+      computed_metrics: {
+        samples_7d: recentReadings.length,
+        avg_7d: average(recentReadings.map((r) => r.value)),
+        last_24h_avg: average(
+          recentReadings
+            .filter((r) => r.recorded_at && Date.now() - new Date(r.recorded_at).getTime() <= 24 * 60 * 60 * 1000)
+            .map((r) => r.value)
+        ),
+        recent_alert_count: (alertHistoryByUserId.get(userId) || []).filter(
+          (a) => a.device_id === device.id
+        ).length
+      },
+      conversation_memory: getAiConversation(userId, deviceId)
+    }
+    const analytics = computeAdvancedAnalytics(
+      recentReadings,
+      dailyTrendRows,
+      latestReading?.sensor_type || recentReadings[recentReadings.length - 1]?.sensor_type || null
+    )
+    context.analytics = analytics
+
+    if (questionIntent === "greeting") {
+      return res.json({
+        device: context.device,
+        question: question || null,
+        insight: {
+          summary:
+            "I can help interpret this device's sensor data and leak risk in plain language.",
+          key_points: [
+            "Ask about trend direction (up/down/stable).",
+            "Ask whether leak risk is increasing this week.",
+            "Ask for a 24-hour action plan based on latest readings."
+          ],
+          recommendations: [
+            "Try: 'Is leak risk increasing this week?'",
+            "Try: 'What changed in the last 24 hours and what should I do next?'"
+          ],
+          answer:
+            "Hi! Ask me a data question about this device and I will analyze the readings, trend, risk, and next actions.",
+          trend: { direction: "flat", percent_change: null }
+        },
+        source: "openai"
+      })
+    }
+
+    const deterministic = buildDeterministicInsight(
+      device,
+      latestReading,
+      recentReadings,
+      dailyTrendRows,
+      question,
+      analytics
+    )
+
+    let aiInsight = null
+    try {
+      aiInsight = await generateOpenAIInsight(context, question)
+    } catch (err) {
+      console.warn("[ai] fallback to deterministic insight:", err.message)
+    }
+
+    const insight = {
+      ...deterministic,
+      ...(aiInsight && typeof aiInsight === "object" ? aiInsight : {})
+    }
+    pushAiConversationTurn(userId, deviceId, {
+      question: question || "(proactive summary)",
+      answer: insight?.answer || insight?.summary || null,
+      trend: insight?.trend || null,
+      at: new Date().toISOString()
+    })
+
+    return res.json({
+      device: context.device,
+      question: question || null,
+      insight,
+      analytics,
+      source: aiInsight ? "openai" : "rule_based"
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ message: "Could not generate AI insight" })
   }
 })
 

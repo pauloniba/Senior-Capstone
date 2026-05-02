@@ -1,6 +1,11 @@
 import { useParams, Link, useNavigate } from "react-router-dom"
 import { useEffect, useMemo, useState } from "react"
-import { fetchDeviceReadings, fetchDeviceTimeseries, patchDevice } from "../api"
+import {
+  fetchAgentInsights,
+  fetchDeviceReadings,
+  fetchDeviceTimeseries,
+  patchDevice
+} from "../api"
 import "./Home.css"
 import "./DayDetails.css"
 
@@ -221,6 +226,12 @@ function DayDetails({ darkMode, setDarkMode }) {
   const [deviceNameDraft, setDeviceNameDraft] = useState("")
   const [renaming, setRenaming] = useState(false)
   const [renameError, setRenameError] = useState("")
+  const [agentQuestion, setAgentQuestion] = useState("")
+  const [agentInsight, setAgentInsight] = useState(null)
+  const [agentAnalytics, setAgentAnalytics] = useState(null)
+  const [agentSource, setAgentSource] = useState("")
+  const [agentLoading, setAgentLoading] = useState(false)
+  const [agentError, setAgentError] = useState("")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
 
@@ -246,9 +257,11 @@ function DayDetails({ darkMode, setDarkMode }) {
     }
 
     let mounted = true
-    const load = async () => {
-      setLoading(true)
-      setError("")
+    const load = async ({ silent = false } = {}) => {
+      if (!silent) {
+        setLoading(true)
+        setError("")
+      }
       try {
         const selected = VIEW_MODES.find((m) => m.id === viewMode) || VIEW_MODES[0]
         const [series, details] = await Promise.all([
@@ -274,25 +287,29 @@ function DayDetails({ darkMode, setDarkMode }) {
           latest_value: details?.device?.latest_value ?? null,
           latest_recorded_at: details?.device?.latest_recorded_at ?? null,
         })
-        setDeviceNameDraft((details?.device?.name || "").trim())
+        if (!editingDeviceName) {
+          setDeviceNameDraft((details?.device?.name || "").trim())
+        }
         setStats(series?.stats || { min: null, max: null, avg: null, count: 0 })
         setReadings(series?.readings || [])
         setAlerts(details?.alerts || [])
         setQueryMeta(series?.query || null)
       } catch (err) {
         if (!mounted) return
-        setError(err.message || "Could not load device details")
+        if (!silent) {
+          setError(err.message || "Could not load device details")
+        }
       } finally {
-        if (mounted) setLoading(false)
+        if (mounted && !silent) setLoading(false)
       }
     }
     load()
-    const intervalId = window.setInterval(load, 10000)
+    const intervalId = window.setInterval(() => load({ silent: true }), 10000)
     return () => {
       mounted = false
       window.clearInterval(intervalId)
     }
-  }, [deviceId, navigate, viewMode])
+  }, [deviceId, editingDeviceName, navigate, viewMode])
 
   const selectedMode = VIEW_MODES.find((m) => m.id === viewMode) || VIEW_MODES[0]
   const threshold = selectedMode.metric === "readings" ? thresholdFor(device?.sensor_type, device?.unit) : null
@@ -329,6 +346,34 @@ function DayDetails({ darkMode, setDarkMode }) {
         : [],
     [chartModel.points, selectedMode.metric, threshold]
   )
+
+  async function requestInsight(customQuestion = "") {
+    const raw = localStorage.getItem("homesense_user")
+    let userId = null
+    try {
+      userId = raw ? JSON.parse(raw)?.id : null
+    } catch {
+      userId = null
+    }
+    if (!userId) {
+      setAgentError("Could not find signed-in user.")
+      return
+    }
+    setAgentLoading(true)
+    setAgentError("")
+    try {
+      const data = await fetchAgentInsights(userId, deviceId, {
+        question: customQuestion || undefined
+      })
+      setAgentInsight(data?.insight || null)
+      setAgentAnalytics(data?.analytics || null)
+      setAgentSource(data?.source || "")
+    } catch (err) {
+      setAgentError(err.message || "Could not generate AI insight")
+    } finally {
+      setAgentLoading(false)
+    }
+  }
 
   return (
     <div className={`dashboard gf-dashboard ${darkMode ? "dark" : "light"}`}>
@@ -515,6 +560,104 @@ function DayDetails({ darkMode, setDarkMode }) {
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+
+          <div className="card mb-3">
+            <div className="card-header">Agentic AI Insights</div>
+            <div className="card-body dd-ai-card">
+              <p className="text-muted small dd-ai-help">
+                Ask what this data means. The AI analyzes your sensor trend, flags possible leak patterns, and gives recommendations.
+              </p>
+              <form
+                className="dd-ai-input-row"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  if (agentLoading) return
+                  requestInsight(agentQuestion.trim())
+                }}
+              >
+                <input
+                  type="text"
+                  className="form-control dd-ai-input"
+                  placeholder="Example: Is this sensor showing an increasing leak risk?"
+                  value={agentQuestion}
+                  onChange={(e) => setAgentQuestion(e.target.value)}
+                />
+                <button type="submit" className="btn btn-primary dd-ai-primary-btn" disabled={agentLoading}>
+                  {agentLoading ? "Analyzing..." : "Ask AI"}
+                </button>
+              </form>
+              <div className="dd-ai-actions">
+                <button
+                  type="button"
+                  className="btn btn-outline-secondary btn-sm"
+                  disabled={agentLoading}
+                  onClick={() => requestInsight("")}
+                >
+                  Generate proactive summary
+                </button>
+              </div>
+              {agentError ? (
+                <div className="alert alert-danger small py-2 mt-3 mb-0" role="alert">
+                  {agentError}
+                </div>
+              ) : null}
+              {agentInsight ? (
+                <div className="dd-ai-result">
+                  <div className="small text-muted dd-ai-source">
+                    Source: {agentSource === "openai" ? "OpenAI" : "Rule-based fallback"}
+                  </div>
+                  <p className="mb-2">
+                    <strong>Summary:</strong> {agentInsight.summary || "No summary provided."}
+                  </p>
+                  {agentInsight.answer ? (
+                    <p className="mb-2">
+                      <strong>Answer:</strong> {agentInsight.answer}
+                    </p>
+                  ) : null}
+                  <p className="mb-1">
+                    <strong>Key points</strong>
+                  </p>
+                  <ul className="mb-2">
+                    {(agentInsight.key_points || []).map((point, idx) => (
+                      <li key={`${point}-${idx}`}>{point}</li>
+                    ))}
+                  </ul>
+                  <p className="mb-1">
+                    <strong>Recommendations</strong>
+                  </p>
+                  <ul className="mb-0">
+                    {(agentInsight.recommendations || []).map((item, idx) => (
+                      <li key={`${item}-${idx}`}>{item}</li>
+                    ))}
+                  </ul>
+                  {agentAnalytics ? (
+                    <div className="dd-ai-metrics mt-3">
+                      <div>
+                        <strong>Leak risk score:</strong>{" "}
+                        {agentAnalytics?.leak_risk?.score ?? "n/a"} / 100 (
+                        {agentAnalytics?.leak_risk?.level || "n/a"})
+                      </div>
+                      <div>
+                        <strong>Week-over-week:</strong>{" "}
+                        {agentAnalytics?.week_over_week?.percent_change ?? "n/a"}% (
+                        {agentAnalytics?.week_over_week?.direction || "n/a"})
+                      </div>
+                      <div>
+                        <strong>Anomaly:</strong>{" "}
+                        {agentAnalytics?.anomaly?.is_anomaly
+                          ? `Yes (z-score ${agentAnalytics?.anomaly?.z_score ?? "n/a"})`
+                          : "No"}
+                      </div>
+                      <div>
+                        <strong>Forecast next reading:</strong>{" "}
+                        {agentAnalytics?.forecast?.next_value ?? "n/a"}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </div>
 
