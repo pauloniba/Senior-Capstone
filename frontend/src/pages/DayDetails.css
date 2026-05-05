@@ -107,11 +107,6 @@
   white-space: nowrap;
 }
 
-.dd-ai-actions {
-  display: flex;
-  justify-content: flex-start;
-}
-
 .dd-ai-result {
   margin-top: 0.25rem;
   padding-top: 0.75rem;
@@ -120,14 +115,6 @@
 
 .dd-ai-source {
   margin-bottom: 0.5rem;
-}
-
-.dd-ai-metrics {
-  border-top: 1px dashed var(--theme-border);
-  padding-top: 0.625rem;
-  display: grid;
-  gap: 0.25rem;
-  font-size: 0.92rem;
 }
 
 @media (max-width: 767px) {

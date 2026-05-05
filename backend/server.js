@@ -53,8 +53,63 @@ function unitFromSensorType(sensorType, explicitUnit) {
   return map[t] || ""
 }
 
-function uidLabel(deviceUid) {
-  return deviceUid.replaceAll("-", " ")
+/** Human-readable device name for UI (never show raw IDs like `1-dev-kitchen-01`). */
+function friendlyDeviceDisplayName(displayName, deviceUid) {
+  const n = String(displayName || "").trim()
+  if (n) return n
+  const uid = String(deviceUid || "").trim()
+  const suffixMatch = uid.match(/^\d+-(.+)$/)
+  const suffix = suffixMatch ? suffixMatch[1] : uid
+  const known = {
+    "dev-attic-01": "Attic sensor",
+    "dev-basement-01": "Basement sensor",
+    "dev-kitchen-01": "Kitchen sensor"
+  }
+  if (known[suffix]) return known[suffix]
+  const rest = suffix
+    .replace(/^dev-/i, "")
+    .replace(/-/g, " ")
+    .replace(/\b\d+\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!rest) return "Your device"
+  const titled = rest
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ")
+  return `${titled} device`
+}
+
+function prettifyUnitForMessage(unit) {
+  const u = String(unit || "").trim()
+  if (!u) return ""
+  if (/^c$/i.test(u)) return "°C"
+  if (/^f$/i.test(u)) return "°F"
+  if (u.toLowerCase().includes("rh")) return u
+  return u
+}
+
+function formatReadingForUser(value, unit) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—"
+  const u = prettifyUnitForMessage(unit)
+  const rounded = Math.abs(value) >= 100 ? Number(value.toFixed(1)) : Number(value.toFixed(2))
+  return u ? `${rounded} ${u}` : String(rounded)
+}
+
+function friendlySensorLabel(sensorType) {
+  const t = String(sensorType || "").toLowerCase()
+  const map = {
+    temperature: "Temperature",
+    humidity: "Humidity",
+    moisture: "Moisture",
+    power: "Power use",
+    power_w: "Power use",
+    vibration: "Vibration",
+    flow: "Flow",
+    custom: "Sensor reading"
+  }
+  return map[t] || (t ? `${t.charAt(0).toUpperCase()}${t.slice(1)}` : "Reading")
 }
 
 /** Map `12-dev-attic-01` → defaults keyed by `dev-attic-01` (legacy uids still work). */
@@ -130,17 +185,19 @@ function evaluateAlert(sensorType, value, unit, thresholdConfig) {
   if (typeof value !== "number" || Number.isNaN(value)) return null
 
   const thresholds = normalizeThresholdConfig(thresholdConfig, sensorType, unit)
-  const formatted = `${value}${unit ? ` ${unit}` : ""}`
+  const label = friendlySensorLabel(type)
+  const reading = formatReadingForUser(value, unit)
 
   if (
     thresholds.critical_max !== null &&
     thresholds.critical_max !== undefined &&
     value >= thresholds.critical_max
   ) {
+    const thr = formatReadingForUser(thresholds.critical_max, unit)
     return {
       kind: "threshold",
       level: "critical",
-      message: `${type || "sensor"} critically high (${formatted} >= ${thresholds.critical_max})`
+      message: `${label} is critically high at ${reading} (serious level: ${thr}+). Check the sensor or what's around it soon.`
     }
   }
   if (
@@ -148,10 +205,11 @@ function evaluateAlert(sensorType, value, unit, thresholdConfig) {
     thresholds.critical_min !== undefined &&
     value <= thresholds.critical_min
   ) {
+    const thr = formatReadingForUser(thresholds.critical_min, unit)
     return {
       kind: "threshold",
       level: "critical",
-      message: `${type || "sensor"} critically low (${formatted} <= ${thresholds.critical_min})`
+      message: `${label} is critically low at ${reading} (serious level: ${thr} or below). Check the sensor or what's around it soon.`
     }
   }
   if (
@@ -159,10 +217,11 @@ function evaluateAlert(sensorType, value, unit, thresholdConfig) {
     thresholds.warning_max !== undefined &&
     value >= thresholds.warning_max
   ) {
+    const thr = formatReadingForUser(thresholds.warning_max, unit)
     return {
       kind: "threshold",
       level: "warning",
-      message: `${type || "sensor"} high (${formatted} >= ${thresholds.warning_max})`
+      message: `${label}: ${reading}. That's above your usual heads-up (${thr}).`
     }
   }
   if (
@@ -170,10 +229,11 @@ function evaluateAlert(sensorType, value, unit, thresholdConfig) {
     thresholds.warning_min !== undefined &&
     value <= thresholds.warning_min
   ) {
+    const thr = formatReadingForUser(thresholds.warning_min, unit)
     return {
       kind: "threshold",
       level: "warning",
-      message: `${type || "sensor"} low (${formatted} <= ${thresholds.warning_min})`
+      message: `${label}: ${reading}. That's below your usual heads-up (${thr}).`
     }
   }
   return null
@@ -598,6 +658,47 @@ function pushAiConversationTurn(userId, deviceId, turn) {
   aiConversationByDeviceKey.set(key, turns)
 }
 
+function enforceQuestionAwareInsight(insight, question, fallbackSummary) {
+  const safeInsight = insight && typeof insight === "object" ? { ...insight } : {}
+  const q = String(question || "").trim()
+
+  if (Array.isArray(safeInsight.key_points)) {
+    safeInsight.key_points = safeInsight.key_points
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .slice(0, 4)
+  } else {
+    safeInsight.key_points = []
+  }
+
+  if (Array.isArray(safeInsight.recommendations)) {
+    safeInsight.recommendations = safeInsight.recommendations
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .slice(0, 2)
+  } else {
+    safeInsight.recommendations = []
+  }
+
+  if (q) {
+    const answerText = String(safeInsight.answer || "").trim()
+    const looksQuestionAware =
+      answerText.toLowerCase().includes("your question") ||
+      answerText.toLowerCase().includes(q.toLowerCase().slice(0, 20))
+    if (!answerText || !looksQuestionAware) {
+      safeInsight.answer = `To answer your question "${q}": ${String(
+        safeInsight.summary || fallbackSummary || "Based on current readings, risk appears stable."
+      )}`
+    }
+  }
+
+  if (!String(safeInsight.summary || "").trim()) {
+    safeInsight.summary = String(fallbackSummary || "No summary available yet.")
+  }
+
+  return safeInsight
+}
+
 function buildDeterministicInsight(
   device,
   latestReading,
@@ -606,7 +707,7 @@ function buildDeterministicInsight(
   question,
   analytics = null
 ) {
-  const deviceName = device?.name || uidLabel(device?.device_uid || "device")
+  const deviceName = friendlyDeviceDisplayName(device?.name, device?.device_uid || "device")
   const sensorType = latestReading?.sensor_type || recentReadings[recentReadings.length - 1]?.sensor_type || "sensor"
   const unit = unitFromSensorType(sensorType, latestReading?.unit || "")
   const values = recentReadings.map((r) => r.value).filter((v) => Number.isFinite(v))
@@ -651,7 +752,7 @@ function buildDeterministicInsight(
   const modeledRisk = analytics?.leak_risk?.level || riskLevel
   const modeledScore = analytics?.leak_risk?.score
   const answerText = question
-    ? `Question: "${question}". Based on this device's recent history, ${trendText.toLowerCase()} Current risk is ${modeledRisk}${
+    ? `To answer your question "${question}": ${trendText} Current risk is ${modeledRisk}${
         Number.isFinite(modeledScore) ? ` (score ${modeledScore}/100)` : ""
       }.`
     : null
@@ -659,7 +760,7 @@ function buildDeterministicInsight(
   return {
     summary: `For ${deviceName}, the ${sensorType} sensor currently reads ${
       latestValue !== null ? `${latestValue}${unit ? ` ${unit}` : ""}` : "no recent value"
-    }. ${trendText} Current risk level is ${modeledRisk}${
+    }. ${trendText} Risk is ${modeledRisk}${
       Number.isFinite(modeledScore) ? ` (score ${modeledScore}/100)` : ""
     }.`,
     key_points: [
@@ -674,17 +775,11 @@ function buildDeterministicInsight(
       trendText,
       latestDeltaText,
       `Estimated risk level: ${modeledRisk}.`,
-      Number.isFinite(modeledScore) ? `Leak risk score: ${modeledScore}/100.` : "Leak risk score: n/a.",
-      analytics?.anomaly?.is_anomaly
-        ? `Anomaly detected (z-score ${analytics?.anomaly?.z_score ?? "n/a"}).`
-        : "No strong anomaly detected versus recent baseline."
+      Number.isFinite(modeledScore) ? `Leak risk score: ${modeledScore}/100.` : "Leak risk score: n/a."
     ],
     recommendations: [
-      "Monitor this device at least twice daily and compare with threshold alerts.",
-      "Inspect nearby pipes/fittings if readings remain elevated for 48+ hours.",
-      "Tune warning and critical thresholds to match the device's local baseline.",
-      "If risk stays medium/high for multiple days, schedule preventative maintenance.",
-      "Track whether humidity/moisture changes correlate with weather or appliance usage."
+      "Check this device again in 24 hours and compare against alerts.",
+      "If readings keep rising for 2 days, inspect nearby pipes/fittings."
     ],
     answer: answerText,
     trend: {
@@ -730,8 +825,8 @@ async function generateOpenAIInsight(context, question) {
             type: "input_text",
             text:
               "Return strict JSON only with keys: summary (string), key_points (string[]), recommendations (string[]), answer (string|null), trend ({direction:'up'|'down'|'flat', percent_change:number|null}). " +
-              "Make the analysis detailed: summary should be 2-4 sentences; key_points should contain 5-7 specific data-backed bullets; recommendations should contain 4-6 concrete actions with time horizons where relevant. " +
-              "Do not reuse the same opening sentence across requests. If data hasn't materially changed, explicitly say that and provide a different perspective based on the user's question."
+              "Be concise and user-friendly for first-time users. summary must be 1-2 short sentences. key_points must have 3-4 short bullets. recommendations must have 1-2 practical next steps. " +
+              "If a question is provided, answer it directly in `answer` starting with: To answer your question. Avoid jargon, avoid long paragraphs, and keep wording simple."
           }
         ]
       },
@@ -1113,7 +1208,7 @@ app.patch("/api/users/:userId/devices/:deviceId", async (req, res) => {
       success: true,
       device: {
         ...device,
-        label: device.name || uidLabel(device.device_uid)
+        label: friendlyDeviceDisplayName(device.name, device.device_uid)
       }
     })
   } catch (err) {
@@ -1257,7 +1352,7 @@ app.get("/api/users/:userId/devices/overview", async (req, res) => {
         id: row.id,
         name: row.name,
         device_uid: row.device_uid,
-        label: row.name || uidLabel(row.device_uid),
+        label: friendlyDeviceDisplayName(row.name, row.device_uid),
         reading: source.value,
         sensor_type: source.sensor_type,
         unit,
@@ -1317,7 +1412,7 @@ app.post("/api/readings", async (req, res) => {
 
   try {
     const { rows } = await query(
-      "SELECT id, user_id FROM devices WHERE device_uid = $1 LIMIT 1",
+      "SELECT id, user_id, name FROM devices WHERE device_uid = $1 LIMIT 1",
       [deviceUid]
     )
     if (rows.length === 0) {
@@ -1326,6 +1421,7 @@ app.post("/api/readings", async (req, res) => {
 
     const deviceId = rows[0].id
     const userId = rows[0].user_id
+    const deviceDisplayName = rows[0].name
     const st = sensorType || "custom"
     const resolvedUnit =
       typeof unitOverride === "string" ? unitOverride : unitFromSensorType(st, "")
@@ -1353,7 +1449,7 @@ app.post("/api/readings", async (req, res) => {
       pushAlert(userId, {
         device_id: deviceId,
         device_uid: deviceUid,
-        label: uidLabel(deviceUid),
+        label: friendlyDeviceDisplayName(deviceDisplayName, deviceUid),
         sensor_type: st,
         value,
         unit: resolvedUnit,
@@ -1451,7 +1547,7 @@ app.get("/api/users/:userId/devices/:deviceId/readings", async (req, res) => {
         id: device.id,
         name: device.name,
         device_uid: device.device_uid,
-        label: device.name || uidLabel(device.device_uid),
+        label: friendlyDeviceDisplayName(device.name, device.device_uid),
         sensor_type: latest?.sensor_type || null,
         unit: latestUnit,
         latest_value: latest?.value ?? null,
@@ -1665,7 +1761,7 @@ app.get("/api/users/:userId/devices/:deviceId/readings/timeseries", async (req, 
         id: device.id,
         name: device.name,
         device_uid: device.device_uid,
-        label: device.name || uidLabel(device.device_uid),
+        label: friendlyDeviceDisplayName(device.name, device.device_uid),
         sensor_type: metric === "critical_counts" ? "critical_count" : latest?.sensor_type || null,
         unit: metric === "critical_counts" ? "events" : latestUnit || null
       },
@@ -1778,7 +1874,7 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
       device: {
         id: device.id,
         name: device.name,
-        label: device.name || uidLabel(device.device_uid),
+        label: friendlyDeviceDisplayName(device.name, device.device_uid),
         device_uid: device.device_uid
       },
       latest_reading: latestReading,
@@ -1849,17 +1945,18 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
       ...deterministic,
       ...(aiInsight && typeof aiInsight === "object" ? aiInsight : {})
     }
+    const normalizedInsight = enforceQuestionAwareInsight(insight, question, deterministic.summary)
     pushAiConversationTurn(userId, deviceId, {
       question: question || "(proactive summary)",
-      answer: insight?.answer || insight?.summary || null,
-      trend: insight?.trend || null,
+      answer: normalizedInsight?.answer || normalizedInsight?.summary || null,
+      trend: normalizedInsight?.trend || null,
       at: new Date().toISOString()
     })
 
     return res.json({
       device: context.device,
       question: question || null,
-      insight,
+      insight: normalizedInsight,
       analytics,
       source: aiInsight ? "openai" : "rule_based"
     })

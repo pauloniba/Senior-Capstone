@@ -33,6 +33,14 @@ function formatTimestamp(iso) {
   return date.toLocaleString()
 }
 
+function formatAlertLevel(level) {
+  const s = String(level || "").toLowerCase()
+  if (s === "critical") return "Critical"
+  if (s === "warning") return "Warning"
+  if (!s) return "—"
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
 function thresholdFor(sensorType, unit) {
   const t = String(sensorType || "").toLowerCase()
   if (t === "temperature") {
@@ -228,7 +236,6 @@ function DayDetails({ darkMode, setDarkMode }) {
   const [renameError, setRenameError] = useState("")
   const [agentQuestion, setAgentQuestion] = useState("")
   const [agentInsight, setAgentInsight] = useState(null)
-  const [agentAnalytics, setAgentAnalytics] = useState(null)
   const [agentSource, setAgentSource] = useState("")
   const [agentLoading, setAgentLoading] = useState(false)
   const [agentError, setAgentError] = useState("")
@@ -366,7 +373,6 @@ function DayDetails({ darkMode, setDarkMode }) {
         question: customQuestion || undefined
       })
       setAgentInsight(data?.insight || null)
-      setAgentAnalytics(data?.analytics || null)
       setAgentSource(data?.source || "")
     } catch (err) {
       setAgentError(err.message || "Could not generate AI insight")
@@ -567,7 +573,7 @@ function DayDetails({ darkMode, setDarkMode }) {
             <div className="card-header">Agentic AI Insights</div>
             <div className="card-body dd-ai-card">
               <p className="text-muted small dd-ai-help">
-                Ask what this data means. The AI analyzes your sensor trend, flags possible leak patterns, and gives recommendations.
+                Ask a question and get a short answer with key points and a recommendation.
               </p>
               <form
                 className="dd-ai-input-row"
@@ -588,16 +594,6 @@ function DayDetails({ darkMode, setDarkMode }) {
                   {agentLoading ? "Analyzing..." : "Ask AI"}
                 </button>
               </form>
-              <div className="dd-ai-actions">
-                <button
-                  type="button"
-                  className="btn btn-outline-secondary btn-sm"
-                  disabled={agentLoading}
-                  onClick={() => requestInsight("")}
-                >
-                  Generate proactive summary
-                </button>
-              </div>
               {agentError ? (
                 <div className="alert alert-danger small py-2 mt-3 mb-0" role="alert">
                   {agentError}
@@ -608,14 +604,15 @@ function DayDetails({ darkMode, setDarkMode }) {
                   <div className="small text-muted dd-ai-source">
                     Source: {agentSource === "openai" ? "OpenAI" : "Rule-based fallback"}
                   </div>
-                  <p className="mb-2">
-                    <strong>Summary:</strong> {agentInsight.summary || "No summary provided."}
-                  </p>
                   {agentInsight.answer ? (
                     <p className="mb-2">
                       <strong>Answer:</strong> {agentInsight.answer}
                     </p>
-                  ) : null}
+                  ) : (
+                    <p className="mb-2">
+                      <strong>Answer:</strong> {agentInsight.summary || "No answer provided."}
+                    </p>
+                  )}
                   <p className="mb-1">
                     <strong>Key points</strong>
                   </p>
@@ -625,37 +622,13 @@ function DayDetails({ darkMode, setDarkMode }) {
                     ))}
                   </ul>
                   <p className="mb-1">
-                    <strong>Recommendations</strong>
+                    <strong>Recommendation</strong>
                   </p>
                   <ul className="mb-0">
                     {(agentInsight.recommendations || []).map((item, idx) => (
                       <li key={`${item}-${idx}`}>{item}</li>
                     ))}
                   </ul>
-                  {agentAnalytics ? (
-                    <div className="dd-ai-metrics mt-3">
-                      <div>
-                        <strong>Leak risk score:</strong>{" "}
-                        {agentAnalytics?.leak_risk?.score ?? "n/a"} / 100 (
-                        {agentAnalytics?.leak_risk?.level || "n/a"})
-                      </div>
-                      <div>
-                        <strong>Week-over-week:</strong>{" "}
-                        {agentAnalytics?.week_over_week?.percent_change ?? "n/a"}% (
-                        {agentAnalytics?.week_over_week?.direction || "n/a"})
-                      </div>
-                      <div>
-                        <strong>Anomaly:</strong>{" "}
-                        {agentAnalytics?.anomaly?.is_anomaly
-                          ? `Yes (z-score ${agentAnalytics?.anomaly?.z_score ?? "n/a"})`
-                          : "No"}
-                      </div>
-                      <div>
-                        <strong>Forecast next reading:</strong>{" "}
-                        {agentAnalytics?.forecast?.next_value ?? "n/a"}
-                      </div>
-                    </div>
-                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -835,7 +808,7 @@ function DayDetails({ darkMode, setDarkMode }) {
                         <tr key={`${alert.recorded_at}-${idx}`}>
                           <td>{formatTimestamp(alert.recorded_at)}</td>
                           <td className={alert.level === "critical" ? "text-danger fw-semibold" : "text-warning fw-semibold"}>
-                            {alert.level}
+                            {formatAlertLevel(alert.level)}
                           </td>
                           <td>{alert.message}</td>
                         </tr>

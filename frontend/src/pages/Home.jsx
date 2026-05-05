@@ -24,6 +24,14 @@ function formatLastUpdated(isoString) {
   return `Updated ${d.toLocaleTimeString()}`;
 }
 
+function formatAlertLevel(level) {
+  const s = String(level || "").toLowerCase();
+  if (s === "critical") return "Critical";
+  if (s === "warning") return "Warning";
+  if (!s) return "—";
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function Home({ darkMode, setDarkMode }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [user, setUser] = useState(null);
@@ -262,7 +270,7 @@ function Home({ darkMode, setDarkMode }) {
                         <td>{new Date(alert.recorded_at).toLocaleString()}</td>
                         <td>{alert.label || alert.device_uid}</td>
                         <td className={alert.level === "critical" ? "text-danger fw-semibold" : "text-warning fw-semibold"}>
-                          {alert.level}
+                          {formatAlertLevel(alert.level)}
                         </td>
                         <td>{alert.message}</td>
                       </tr>
