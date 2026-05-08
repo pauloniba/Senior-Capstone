@@ -1,4 +1,4 @@
--- Home Sensor database (PostgreSQL + TimescaleDB)
+-- Home Sensor database (plain PostgreSQL — runs on RDS or local Postgres)
 -- Runs once when the Postgres data volume is first created (docker-entrypoint-initdb.d).
 -- If you change this file, reset the volume: docker compose down -v && docker compose up -d
 
@@ -45,10 +45,8 @@ CREATE TABLE IF NOT EXISTS device_thresholds (
 CREATE INDEX IF NOT EXISTS device_thresholds_device_idx
     ON device_thresholds (device_id);
 
-CREATE EXTENSION IF NOT EXISTS timescaledb;
-
 CREATE TABLE IF NOT EXISTS sensor_readings (
-    id          BIGSERIAL,
+    id          BIGSERIAL PRIMARY KEY,
     device_id   INTEGER NOT NULL REFERENCES devices (id) ON DELETE CASCADE,
     sensor_type VARCHAR(64) NOT NULL,
     value       DOUBLE PRECISION NOT NULL,
@@ -56,77 +54,10 @@ CREATE TABLE IF NOT EXISTS sensor_readings (
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Hypertables require unique indexes (including PK) to include the partition column.
--- We do not rely on id uniqueness in app code, so drop legacy PK if present.
-ALTER TABLE sensor_readings DROP CONSTRAINT IF EXISTS sensor_readings_pkey;
-
-SELECT create_hypertable(
-    'sensor_readings',
-    'recorded_at',
-    if_not_exists => TRUE,
-    migrate_data => TRUE
-);
-
 CREATE INDEX IF NOT EXISTS sensor_readings_device_time_idx
     ON sensor_readings (device_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS sensor_readings_type_time_idx
     ON sensor_readings (sensor_type, recorded_at DESC);
-
-ALTER TABLE sensor_readings
-SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'device_id,sensor_type',
-    timescaledb.compress_orderby = 'recorded_at DESC'
-);
-
-SELECT add_compression_policy('sensor_readings', INTERVAL '7 days', if_not_exists => TRUE);
-SELECT add_retention_policy('sensor_readings', INTERVAL '45 days', if_not_exists => TRUE);
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_readings_hourly
-WITH (timescaledb.continuous) AS
-SELECT
-    time_bucket(INTERVAL '1 hour', recorded_at) AS bucket,
-    device_id,
-    sensor_type,
-    AVG(value) AS avg_value,
-    MIN(value) AS min_value,
-    MAX(value) AS max_value,
-    COUNT(*)::BIGINT AS samples
-FROM sensor_readings
-GROUP BY bucket, device_id, sensor_type
-WITH NO DATA;
-
-SELECT add_continuous_aggregate_policy(
-    'sensor_readings_hourly',
-    start_offset => INTERVAL '7 days',
-    end_offset => INTERVAL '5 minutes',
-    schedule_interval => INTERVAL '15 minutes',
-    if_not_exists => TRUE
-);
-SELECT add_retention_policy('sensor_readings_hourly', INTERVAL '365 days', if_not_exists => TRUE);
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_readings_daily
-WITH (timescaledb.continuous) AS
-SELECT
-    time_bucket(INTERVAL '1 day', recorded_at) AS bucket,
-    device_id,
-    sensor_type,
-    AVG(value) AS avg_value,
-    MIN(value) AS min_value,
-    MAX(value) AS max_value,
-    COUNT(*)::BIGINT AS samples
-FROM sensor_readings
-GROUP BY bucket, device_id, sensor_type
-WITH NO DATA;
-
-SELECT add_continuous_aggregate_policy(
-    'sensor_readings_daily',
-    start_offset => INTERVAL '180 days',
-    end_offset => INTERVAL '1 hour',
-    schedule_interval => INTERVAL '1 hour',
-    if_not_exists => TRUE
-);
-SELECT add_retention_policy('sensor_readings_daily', INTERVAL '3 years', if_not_exists => TRUE);
 
 -- Test account (password: password123) — bcrypt hash generated for bcryptjs
 INSERT INTO users (email, password, first_name, last_name, display_name)
@@ -137,7 +68,6 @@ VALUES (
     'User',
     'Test User'
 )
-
 ON CONFLICT (email) DO NOTHING;
 
 UPDATE users

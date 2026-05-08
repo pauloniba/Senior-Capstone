@@ -1,7 +1,7 @@
 services:
   db:
-    # TimescaleDB on PostgreSQL 16 for time-series retention/rollups.
-    image: timescale/timescaledb:latest-pg16
+    # Plain PostgreSQL 16 (matches Amazon RDS Postgres in production).
+    image: postgres:16-alpine
     restart: always
     environment:
       POSTGRES_DB: mydatabase

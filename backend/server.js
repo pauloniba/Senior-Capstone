@@ -352,10 +352,9 @@ async function ensureTimeseriesSchema() {
           OR d.device_uid LIKE '%dev-kitchen-01'
        ON CONFLICT (device_id, sensor_type) DO NOTHING`
     )
-    await query("CREATE EXTENSION IF NOT EXISTS timescaledb")
     await query(
       `CREATE TABLE IF NOT EXISTS sensor_readings (
-         id BIGSERIAL,
+         id BIGSERIAL PRIMARY KEY,
          device_id INTEGER NOT NULL REFERENCES devices (id) ON DELETE CASCADE,
          sensor_type VARCHAR(64) NOT NULL,
          value DOUBLE PRECISION NOT NULL,
@@ -363,86 +362,14 @@ async function ensureTimeseriesSchema() {
          recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
        )`
     )
-    await query("ALTER TABLE sensor_readings DROP CONSTRAINT IF EXISTS sensor_readings_pkey")
-    await query(
-      "SELECT create_hypertable('sensor_readings', 'recorded_at', if_not_exists => TRUE, migrate_data => TRUE)"
-    )
     await query(
       "CREATE INDEX IF NOT EXISTS sensor_readings_device_time_idx ON sensor_readings (device_id, recorded_at DESC)"
     )
     await query(
       "CREATE INDEX IF NOT EXISTS sensor_readings_type_time_idx ON sensor_readings (sensor_type, recorded_at DESC)"
     )
-    await query(
-      `ALTER TABLE sensor_readings
-       SET (
-         timescaledb.compress,
-         timescaledb.compress_segmentby = 'device_id,sensor_type',
-         timescaledb.compress_orderby = 'recorded_at DESC'
-       )`
-    )
-    await query(
-      "SELECT add_compression_policy('sensor_readings', INTERVAL '7 days', if_not_exists => TRUE)"
-    )
-    await query(
-      "SELECT add_retention_policy('sensor_readings', INTERVAL '45 days', if_not_exists => TRUE)"
-    )
-    await query(
-      `CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_readings_hourly
-       WITH (timescaledb.continuous) AS
-       SELECT
-         time_bucket(INTERVAL '1 hour', recorded_at) AS bucket,
-         device_id,
-         sensor_type,
-         AVG(value) AS avg_value,
-         MIN(value) AS min_value,
-         MAX(value) AS max_value,
-         COUNT(*)::BIGINT AS samples
-       FROM sensor_readings
-       GROUP BY bucket, device_id, sensor_type
-       WITH NO DATA`
-    )
-    await query(
-      `SELECT add_continuous_aggregate_policy(
-         'sensor_readings_hourly',
-         start_offset => INTERVAL '7 days',
-         end_offset => INTERVAL '5 minutes',
-         schedule_interval => INTERVAL '15 minutes',
-         if_not_exists => TRUE
-       )`
-    )
-    await query(
-      "SELECT add_retention_policy('sensor_readings_hourly', INTERVAL '365 days', if_not_exists => TRUE)"
-    )
-    await query(
-      `CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_readings_daily
-       WITH (timescaledb.continuous) AS
-       SELECT
-         time_bucket(INTERVAL '1 day', recorded_at) AS bucket,
-         device_id,
-         sensor_type,
-         AVG(value) AS avg_value,
-         MIN(value) AS min_value,
-         MAX(value) AS max_value,
-         COUNT(*)::BIGINT AS samples
-       FROM sensor_readings
-       GROUP BY bucket, device_id, sensor_type
-       WITH NO DATA`
-    )
-    await query(
-      `SELECT add_continuous_aggregate_policy(
-         'sensor_readings_daily',
-         start_offset => INTERVAL '180 days',
-         end_offset => INTERVAL '1 hour',
-         schedule_interval => INTERVAL '1 hour',
-         if_not_exists => TRUE
-       )`
-    )
-    await query(
-      "SELECT add_retention_policy('sensor_readings_daily', INTERVAL '3 years', if_not_exists => TRUE)"
-    )
   } catch (err) {
-    console.warn("[timescale] setup skipped:", err.message)
+    console.warn("[schema] setup skipped:", err.message)
   }
 }
 
@@ -934,7 +861,7 @@ app.post("/api/register", async (req, res) => {
     const newUser = rows[0]
     await provisionDefaultDevices(query, newUser.id)
     return res.status(201).json({
-      success: true,
+    success: true,
       user: {
         id: newUser.id,
         email: newUser.email,
@@ -989,7 +916,7 @@ app.post("/api/login", async (req, res) => {
     }
 
     return res.json({
-      success: true,
+    success: true,
       user: {
         id: user.id,
         email: user.email,
@@ -1606,11 +1533,19 @@ app.get("/api/users/:userId/devices/:deviceId/readings/timeseries", async (req, 
     let rows = []
     if (metric === "critical_counts") {
       const bucketInterval = criticalBucketForRange(range)
-      const countsRes = await query(
-        `WITH bounds AS (
+      // Whitelist guard — bucketInterval is interpolated as a literal below.
+      const ALLOWED_BUCKETS = ["10 minutes", "1 hour", "1 day", "1 month"]
+      const safeBucket = ALLOWED_BUCKETS.includes(bucketInterval) ? bucketInterval : "10 minutes"
+      // Postgres date_bin doesn't support month/year intervals → use date_trunc for month buckets.
+      const isMonthly = safeBucket === "1 month"
+      const bucketExpr = isMonthly
+        ? "date_trunc('month', $TS$)"
+        : `date_bin(INTERVAL '${safeBucket}', $TS$, TIMESTAMPTZ '2000-01-01')`
+      const seriesStep = `INTERVAL '${safeBucket}'`
+      const sql = `WITH bounds AS (
            SELECT
-             time_bucket($2::interval, NOW() - ($3::interval)) AS raw_a,
-             time_bucket($2::interval, NOW()) AS raw_b
+             ${bucketExpr.replace("$TS$", "NOW() - ($2::interval)")} AS raw_a,
+             ${bucketExpr.replace("$TS$", "NOW()")} AS raw_b
          ),
          span AS (
            SELECT
@@ -1621,18 +1556,18 @@ app.get("/api/users/:userId/devices/:deviceId/readings/timeseries", async (req, 
          series AS (
            SELECT g AS bucket
            FROM span s,
-           LATERAL generate_series(s.start_b, s.end_b, $2::interval) AS g
+           LATERAL generate_series(s.start_b, s.end_b, ${seriesStep}) AS g
          ),
          cnt AS (
            SELECT
-             time_bucket($2::interval, sr.recorded_at) AS bucket,
+             ${bucketExpr.replace("$TS$", "sr.recorded_at")} AS bucket,
              COUNT(*)::BIGINT AS critical_count
            FROM sensor_readings sr
            LEFT JOIN device_thresholds dt
              ON dt.device_id = sr.device_id
             AND lower(dt.sensor_type) = lower(sr.sensor_type)
            WHERE sr.device_id = $1
-             AND sr.recorded_at >= NOW() - ($3::interval)
+             AND sr.recorded_at >= NOW() - ($2::interval)
              AND (
                (
                  COALESCE(dt.critical_max,
@@ -1682,9 +1617,8 @@ app.get("/api/users/:userId/devices/:deviceId/readings/timeseries", async (req, 
          SELECT s.bucket, COALESCE(c.critical_count, 0)::BIGINT AS critical_count
          FROM series s
          LEFT JOIN cnt c ON s.bucket = c.bucket
-         ORDER BY s.bucket ASC`,
-        [device.id, bucketInterval, interval]
-      )
+         ORDER BY s.bucket ASC`
+      const countsRes = await query(sql, [device.id, interval])
       rows = countsRes.rows.map((r) => ({
         t: r.bucket ? new Date(r.bucket).toISOString() : null,
         value: Number.parseInt(r.critical_count, 10) || 0,
@@ -1729,12 +1663,19 @@ app.get("/api/users/:userId/devices/:deviceId/readings/timeseries", async (req, 
         }))
         .reverse()
     } else {
-      const viewName = resolution === "daily" ? "sensor_readings_daily" : "sensor_readings_hourly"
+      const truncUnit = resolution === "daily" ? "day" : "hour"
       const aggRes = await query(
-        `SELECT bucket, avg_value, min_value, max_value, samples, sensor_type
-         FROM ${viewName}
+        `SELECT
+           date_trunc('${truncUnit}', recorded_at) AS bucket,
+           AVG(value) AS avg_value,
+           MIN(value) AS min_value,
+           MAX(value) AS max_value,
+           COUNT(*)::BIGINT AS samples,
+           MIN(sensor_type) AS sensor_type
+         FROM sensor_readings
          WHERE device_id = $1
-           AND bucket >= NOW() - ($2::interval)
+           AND recorded_at >= NOW() - ($2::interval)
+         GROUP BY bucket
          ORDER BY bucket DESC
          LIMIT $3`,
         [device.id, interval, limit]
@@ -1837,7 +1778,7 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
     )
     const dailyTrendRes = await query(
       `SELECT
-         time_bucket(INTERVAL '1 day', recorded_at) AS day_bucket,
+         date_trunc('day', recorded_at) AS day_bucket,
          AVG(value) AS avg_value,
          MIN(value) AS min_value,
          MAX(value) AS max_value,
@@ -1973,7 +1914,7 @@ app.use((req, res) => {
 
 
 ensureTimeseriesSchema().finally(() => {
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`API running on http://localhost:${PORT}`)
-  })
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`API running on http://localhost:${PORT}`)
+})
 })

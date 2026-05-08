@@ -1,0 +1,35 @@
+{
+  "family": "senior-capstone-fake-data",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "arn:aws:iam::035722576129:role/senior-capstone-ecs-exec-role",
+  "containerDefinitions": [
+    {
+      "name": "fake-data",
+      "image": "035722576129.dkr.ecr.us-east-2.amazonaws.com/senior-capstone/backend:latest",
+      "essential": true,
+      "command": ["npm", "run", "fake-readings"],
+      "environment": [
+        { "name": "API_BASE_URL", "value": "http://senior-capstone-alb-2030504935.us-east-2.elb.amazonaws.com" },
+        { "name": "FAKE_INTERVAL_MS", "value": "10000" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:us-east-2:035722576129:parameter/senior-capstone/DATABASE_URL" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/senior-capstone-fake-data",
+          "awslogs-region": "us-east-2",
+          "awslogs-stream-prefix": "fake-data"
+        }
+      }
+    }
+  ]
+}

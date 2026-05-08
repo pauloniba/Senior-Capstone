@@ -36,7 +36,13 @@ let pool = null
 function getPool() {
   const conn = process.env.DATABASE_URL
   if (!conn) return null
-  if (!pool) pool = new pg.Pool({ connectionString: conn })
+  if (!pool) {
+    const useSsl = /\.rds\.amazonaws\.com/i.test(conn)
+    pool = new pg.Pool({
+      connectionString: conn,
+      ssl: useSsl ? { rejectUnauthorized: false } : false
+    })
+  }
   return pool
 }
 

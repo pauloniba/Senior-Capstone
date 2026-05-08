@@ -1,0 +1,38 @@
+{
+  "family": "senior-capstone-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "arn:aws:iam::035722576129:role/senior-capstone-ecs-exec-role",
+  "containerDefinitions": [
+    {
+      "name": "backend",
+      "image": "035722576129.dkr.ecr.us-east-2.amazonaws.com/senior-capstone/backend:latest",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 3001, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "PORT", "value": "3001" },
+        { "name": "OPENAI_MODEL", "value": "gpt-4o-mini" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:us-east-2:035722576129:parameter/senior-capstone/DATABASE_URL" },
+        { "name": "OPENAI_API_KEY", "valueFrom": "arn:aws:ssm:us-east-2:035722576129:parameter/senior-capstone/OPENAI_API_KEY" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/senior-capstone-backend",
+          "awslogs-region": "us-east-2",
+          "awslogs-stream-prefix": "backend"
+        }
+      }
+    }
+  ]
+}
