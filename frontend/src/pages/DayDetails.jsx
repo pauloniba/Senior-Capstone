@@ -667,8 +667,8 @@ function DayDetails({ darkMode, setDarkMode }) {
                   >
                     <defs>
                       <linearGradient id="ddAreaFill" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#ffbe0b" stopOpacity="0.5" />
-                        <stop offset="100%" stopColor="#3ad29f" stopOpacity="0.2" />
+                        <stop offset="0%" stopColor="#8ed091" stopOpacity="0.55" />
+                        <stop offset="100%" stopColor="#2f7a3b" stopOpacity="0.05" />
                       </linearGradient>
                     </defs>
                     {chartModel.yTicks.map((tick) => {
@@ -683,7 +683,7 @@ function DayDetails({ darkMode, setDarkMode }) {
                             x2={CHART_WIDTH - CHART_PADDING}
                             y1={y}
                             y2={y}
-                            stroke="rgba(108, 117, 125, 0.22)"
+                            stroke="rgba(148, 158, 168, 0.16)"
                             strokeWidth="1"
                           />
                           <text
@@ -691,7 +691,7 @@ function DayDetails({ darkMode, setDarkMode }) {
                             y={y + 4}
                             textAnchor="end"
                             fontSize="11"
-                            fill="rgba(108, 117, 125, 0.95)"
+                            fill="rgba(148, 158, 168, 0.85)"
                           >
                             {Number.isInteger(tick) ? tick : tick.toFixed(1)}
                           </text>
@@ -705,30 +705,37 @@ function DayDetails({ darkMode, setDarkMode }) {
                           y={CHART_PADDING}
                           width={CHART_WIDTH - CHART_LEFT_GUTTER - CHART_PADDING}
                           height={Math.max(chartModel.thresholdLineY - CHART_PADDING, 0)}
-                          fill="rgba(220, 53, 69, 0.12)"
+                          fill="rgba(226, 104, 94, 0.10)"
                         />
                         <rect
                           x={CHART_LEFT_GUTTER}
                           y={chartModel.thresholdLineY}
                           width={CHART_WIDTH - CHART_LEFT_GUTTER - CHART_PADDING}
                           height={CHART_HEIGHT - CHART_PADDING - chartModel.thresholdLineY}
-                          fill="rgba(25, 135, 84, 0.12)"
+                          fill="rgba(111, 191, 115, 0.08)"
                         />
                         <line
                           x1={CHART_LEFT_GUTTER}
                           x2={CHART_WIDTH - CHART_PADDING}
                           y1={chartModel.thresholdLineY}
                           y2={chartModel.thresholdLineY}
-                          stroke="rgba(220, 53, 69, 0.8)"
+                          stroke="rgba(226, 104, 94, 0.7)"
                           strokeDasharray="4 4"
-                          strokeWidth="2"
+                          strokeWidth="1.5"
                         />
                       </>
                     ) : null}
                     <polygon points={chartModel.areaPath} fill="url(#ddAreaFill)" />
-                    <polyline points={chartModel.linePoints} fill="none" stroke="#ffbe0b" strokeWidth="4" />
+                    <polyline
+                      points={chartModel.linePoints}
+                      fill="none"
+                      stroke="#6fbf73"
+                      strokeWidth="2.5"
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
                     {criticalMarkers.map((p, idx) => (
-                      <circle key={`${p.x}-${idx}`} cx={p.x} cy={p.y} r="4.5" fill="#dc3545" />
+                      <circle key={`${p.x}-${idx}`} cx={p.x} cy={p.y} r="4" fill="#e2685e" />
                     ))}
                   </svg>
                   <div className="dd-axis-ticks mt-2">

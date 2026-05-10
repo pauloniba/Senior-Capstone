@@ -13,10 +13,13 @@ import './index.css'
 function AppLayout() {
   const location = useLocation()
 
-  // 🌙 Global Dark Mode State
-  const [darkMode, setDarkMode] = useState(
-    () => localStorage.getItem("theme") === "dark"
-  )
+  // Dark by default; honor stored preference if user has toggled before.
+  const [darkMode, setDarkMode] = useState(() => {
+    const stored = localStorage.getItem("theme")
+    if (stored === "light") return false
+    if (stored === "dark") return true
+    return true
+  })
 
   // 🌙 Apply theme globally
   useEffect(() => {
