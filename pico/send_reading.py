@@ -8,8 +8,10 @@ from utime import sleep, ticks_ms
 WIFI_SSID = "YOUR_WIFI_NAME"
 WIFI_PASSWORD = "YOUR_WIFI_PASSWORD"
 
-# Use your computer's LAN IP (not localhost) because Pico runs on a separate device.
-API_BASE_URL = "http://192.168.1.100:8080"
+# Points at the AWS deployment (CloudFront -> ALB -> ECS Fargate backend -> RDS).
+# The Pico can be on any Wi-Fi with internet access; no laptop or local Docker needed.
+# For local dev, swap this for your computer's LAN IP, e.g. "http://192.168.1.100:8080".
+API_BASE_URL = "https://d1cbiu3j43blds.cloudfront.net"
 DEVICE_UID = "dev-kitchen-01"
 SENSOR_TYPE = "temperature"
 UNIT = "C"

@@ -16,7 +16,36 @@ const PORT = process.env.PORT || 8080
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ""
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o"
 
-app.use(cors())
+// Origins allowed to call this API from a browser. Non-browser clients
+// (Pico, fake-data Fargate task, curl, etc.) are unaffected by CORS.
+// Extra origins can be added at deploy time via CORS_EXTRA_ORIGINS (comma-separated).
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://main.d31c4hpzddasf9.amplifyapp.com",
+  "https://d1cbiu3j43blds.cloudfront.net",
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "http://localhost:8080"
+]
+const extraOrigins = (process.env.CORS_EXTRA_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+const ALLOWED_ORIGINS = [...DEFAULT_ALLOWED_ORIGINS, ...extraOrigins]
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      // Non-browser clients (Pico, curl, fake-data) send no Origin and are unaffected.
+      // Browsers send Origin: if it's allowed we echo it back; otherwise we omit the
+      // Access-Control-Allow-Origin header so the browser blocks the response from JS.
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+        return callback(null, true)
+      }
+      return callback(null, false)
+    },
+    credentials: true
+  })
+)
 app.use(express.json())
 
 /** Latest reading cache per device id (DB remains source of truth). */
