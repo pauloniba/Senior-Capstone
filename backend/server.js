@@ -8,6 +8,7 @@ import {
   provisionDefaultDevices,
   userHasDevices
 } from "./provisionDevices.js"
+import { signToken, requireAuth } from "./auth.js"
 
 dotenv.config()
 
@@ -1522,13 +1523,15 @@ app.post("/api/register", async (req, res) => {
     )
     const newUser = rows[0]
     await provisionDefaultDevices(query, newUser.id)
+    const token = signToken(newUser)
     return res.status(201).json({
     success: true,
       user: {
         id: newUser.id,
         email: newUser.email,
         display_name: newUser.display_name
-      }
+      },
+      token
     })
   } catch (err) {
     if (err.code === "23505") {
@@ -1577,13 +1580,15 @@ app.post("/api/login", async (req, res) => {
       await provisionDefaultDevices(query, user.id)
     }
 
+    const token = signToken(user)
     return res.json({
     success: true,
       user: {
         id: user.id,
         email: user.email,
         display_name: user.display_name
-      }
+      },
+      token
     })
   } catch (err) {
     console.error(err)
@@ -1591,7 +1596,7 @@ app.post("/api/login", async (req, res) => {
   }
 })
 
-app.get("/api/users/:userId/profile", async (req, res) => {
+app.get("/api/users/:userId/profile", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -1617,7 +1622,7 @@ app.get("/api/users/:userId/profile", async (req, res) => {
   }
 })
 
-app.patch("/api/users/:userId/profile", async (req, res) => {
+app.patch("/api/users/:userId/profile", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -1669,7 +1674,7 @@ app.patch("/api/users/:userId/profile", async (req, res) => {
   }
 })
 
-app.patch("/api/users/:userId/password", async (req, res) => {
+app.patch("/api/users/:userId/password", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -1706,7 +1711,7 @@ app.patch("/api/users/:userId/password", async (req, res) => {
   }
 })
 
-app.delete("/api/users/:userId", async (req, res) => {
+app.delete("/api/users/:userId", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -1738,7 +1743,7 @@ app.delete("/api/users/:userId", async (req, res) => {
   }
 })
 
-app.get("/api/users/:userId/devices", async (req, res) => {
+app.get("/api/users/:userId/devices", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -1761,7 +1766,7 @@ app.get("/api/users/:userId/devices", async (req, res) => {
   }
 })
 
-app.patch("/api/users/:userId/devices/:deviceId", async (req, res) => {
+app.patch("/api/users/:userId/devices/:deviceId", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -1806,7 +1811,7 @@ app.patch("/api/users/:userId/devices/:deviceId", async (req, res) => {
   }
 })
 
-app.get("/api/users/:userId/devices/:deviceId/thresholds", async (req, res) => {
+app.get("/api/users/:userId/devices/:deviceId/thresholds", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -1838,7 +1843,7 @@ app.get("/api/users/:userId/devices/:deviceId/thresholds", async (req, res) => {
   }
 })
 
-app.patch("/api/users/:userId/devices/:deviceId/thresholds", async (req, res) => {
+app.patch("/api/users/:userId/devices/:deviceId/thresholds", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -1894,7 +1899,7 @@ app.patch("/api/users/:userId/devices/:deviceId/thresholds", async (req, res) =>
 /**
  * Devices for this user with a single raw reading each (live in-memory or seeded default).
  */
-app.get("/api/users/:userId/devices/overview", async (req, res) => {
+app.get("/api/users/:userId/devices/overview", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -1960,7 +1965,7 @@ app.get("/api/users/:userId/devices/overview", async (req, res) => {
 /**
  * Alert history for this user (most recent first).
  */
-app.get("/api/users/:userId/alerts", async (req, res) => {
+app.get("/api/users/:userId/alerts", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -2059,7 +2064,7 @@ app.post("/api/readings", async (req, res) => {
 /**
  * Detailed device readings for charts/table drill-down.
  */
-app.get("/api/users/:userId/devices/:deviceId/readings", async (req, res) => {
+app.get("/api/users/:userId/devices/:deviceId/readings", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -2158,7 +2163,7 @@ app.get("/api/users/:userId/devices/:deviceId/readings", async (req, res) => {
  * - range: 1h | 24h | 7d | 30d | 90d | 365d
  * - resolution: auto | raw | hourly | daily
  */
-app.get("/api/users/:userId/devices/:deviceId/readings/timeseries", async (req, res) => {
+app.get("/api/users/:userId/devices/:deviceId/readings/timeseries", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }
@@ -2395,7 +2400,7 @@ app.get("/api/users/:userId/devices/:deviceId/readings/timeseries", async (req, 
 /**
  * Agentic AI: explains trends and answers device data questions.
  */
-app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res) => {
+app.post("/api/users/:userId/devices/:deviceId/agent/insights", requireAuth, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ message: "Database not configured" })
   }

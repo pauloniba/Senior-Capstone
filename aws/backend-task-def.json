@@ -19,11 +19,13 @@
       ],
       "environment": [
         { "name": "PORT", "value": "3001" },
-        { "name": "OPENAI_MODEL", "value": "gpt-4o-mini" }
+        { "name": "OPENAI_MODEL", "value": "gpt-4o-mini" },
+        { "name": "NODE_ENV", "value": "production" }
       ],
       "secrets": [
         { "name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:us-east-2:035722576129:parameter/senior-capstone/DATABASE_URL" },
-        { "name": "OPENAI_API_KEY", "valueFrom": "arn:aws:ssm:us-east-2:035722576129:parameter/senior-capstone/OPENAI_API_KEY" }
+        { "name": "OPENAI_API_KEY", "valueFrom": "arn:aws:ssm:us-east-2:035722576129:parameter/senior-capstone/OPENAI_API_KEY" },
+        { "name": "JWT_SECRET", "valueFrom": "arn:aws:ssm:us-east-2:035722576129:parameter/senior-capstone/JWT_SECRET" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

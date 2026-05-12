@@ -6,6 +6,7 @@ import {
   patchPassword,
   fetchDeviceOverview,
   deleteAccount,
+  clearStoredAuth,
 } from '../api'
 import './Home.css'
 
@@ -99,7 +100,7 @@ function AccountSettings({ darkMode, setDarkMode }) {
   }, [navigate, load])
 
   function handleLogout() {
-    localStorage.removeItem('homesense_user')
+    clearStoredAuth()
     navigate('/', { replace: true })
   }
 
@@ -441,7 +442,7 @@ function AccountSettings({ darkMode, setDarkMode }) {
                   setDeleting(true)
                   try {
                     await deleteAccount(userId, deletePassword)
-                    localStorage.removeItem('homesense_user')
+                    clearStoredAuth()
                     navigate('/', { replace: true })
                   } catch (err) {
                     setDeleteError(err.message || 'Could not delete account')

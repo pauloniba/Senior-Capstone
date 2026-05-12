@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { createAccount } from '../api'
+import { createAccount, setStoredToken } from '../api'
 
 function CreateAccount({ darkMode, setDarkMode }) {
   const navigate = useNavigate()
@@ -34,6 +34,12 @@ function CreateAccount({ darkMode, setDarkMode }) {
     try {
       const data = await createAccount(email, password)
       if (data.success) {
+        // The register endpoint also issues a session token. Persisting it
+        // means the user is effectively signed in already — but we still
+        // route them through the login page to keep the existing flow.
+        if (data.token) {
+          setStoredToken(data.token)
+        }
         navigate('/')
         return
       }

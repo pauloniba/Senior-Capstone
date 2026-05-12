@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { login } from "../api";
+import { login, setStoredToken } from "../api";
 
 function Login() {
   const navigate = useNavigate();
@@ -21,6 +21,12 @@ function Login() {
       const data = await login(email, password);
       if (data.success) {
         localStorage.setItem("homesense_user", JSON.stringify(data.user));
+        // Persist the JWT issued by /api/login. The api.js wrapper picks this
+        // up automatically and attaches it as Authorization: Bearer on every
+        // protected request.
+        if (data.token) {
+          setStoredToken(data.token);
+        }
         navigate("/home");
         return;
       }

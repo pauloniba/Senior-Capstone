@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useState, useEffect, useCallback } from "react";
-import { fetchAlertHistory, fetchDeviceOverview } from "../api";
+import { fetchAlertHistory, fetchDeviceOverview, clearStoredAuth } from "../api";
 import "./Home.css";
 
 function displayNameFromEmail(email) {
@@ -97,7 +97,9 @@ function Home({ darkMode, setDarkMode }) {
   }, [user?.id, loadDevices]);
 
   function handleLogout() {
-    localStorage.removeItem("homesense_user");
+    // clearStoredAuth wipes both the cached user and the JWT, so the next
+    // page load starts from a clean slate.
+    clearStoredAuth();
     navigate("/", { replace: true });
   }
 
