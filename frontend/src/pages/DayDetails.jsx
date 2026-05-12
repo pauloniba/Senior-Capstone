@@ -610,7 +610,7 @@ function DayDetails({ darkMode, setDarkMode }) {
           </div>
 
           <div className="card mb-3">
-            <div className="card-header">Agentic AI Insights</div>
+            <div className="card-header">HomeSense Agent</div>
             <div className="card-body dd-ai-card">
               <p className="text-muted small dd-ai-help">
                 Ask a question and get a short answer with key points and a recommendation.
@@ -730,6 +730,29 @@ function DayDetails({ darkMode, setDarkMode }) {
                             ))}
                           </ul>
                         </>
+                      ) : null}
+                      {Array.isArray(agentInsight.follow_ups) && agentInsight.follow_ups.length > 0 ? (
+                        <div className="dd-ai-followups">
+                          <p className="dd-ai-followups-label small text-muted mb-2">
+                            To give better advice, the agent wants to know:
+                          </p>
+                          <div className="dd-ai-followups-list">
+                            {agentInsight.follow_ups.map((q, idx) => (
+                              <button
+                                key={`${q}-${idx}`}
+                                type="button"
+                                className="dd-ai-followup-chip"
+                                disabled={agentLoading}
+                                onClick={() => {
+                                  setAgentQuestion(q)
+                                  requestInsight(q)
+                                }}
+                              >
+                                {q}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       ) : null}
                     </>
                   )}

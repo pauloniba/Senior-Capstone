@@ -656,6 +656,238 @@ function criticalPerDay7d(points, thresholds) {
 }
 
 /**
+ * Per-sensor remediation knowledge base. The model gets the playbook for the
+ * current sensor type appended to its context so its "what should I do?"
+ * answers are tailored (e.g. moisture -> check pipe joints, NOT "open a
+ * window"; temperature -> airflow/insulation, NOT "run a dehumidifier").
+ *
+ * Each playbook has:
+ *   - likely_causes: hypotheses the agent can reference
+ *   - environment_questions: clarifying follow-ups when context is missing
+ *     (these become the `follow_ups` chips the user can click in the UI)
+ *   - quick_fixes: things the user can try right now
+ *   - deeper_fixes: longer-term remediation
+ *   - red_flags: things that mean "stop, call a professional"
+ *
+ * The "high" vs "low" branches handle critical_max vs critical_min cases.
+ */
+const REMEDIATION_PLAYBOOKS = {
+  temperature: {
+    high: {
+      likely_causes: [
+        "Direct sun on the room or sensor location",
+        "Poor airflow / blocked vents / closed door",
+        "AC/HVAC undersized or not running",
+        "Heat-producing appliances nearby (oven, dryer, server, fish tank)",
+        "Insufficient insulation in walls or attic"
+      ],
+      environment_questions: [
+        "Which room is this sensor in?",
+        "Does this room get direct sunlight during the day?",
+        "Is the AC or a ceiling/box fan running here?",
+        "Are vents or returns blocked or closed?",
+        "Are there heat-producing appliances near the sensor?"
+      ],
+      quick_fixes: [
+        "Close blinds or curtains during peak sun hours.",
+        "Open the door and run a fan to improve airflow.",
+        "Verify AC vents in this room are open and unblocked.",
+        "Move heat-producing electronics away from the sensor."
+      ],
+      deeper_fixes: [
+        "Have HVAC airflow balanced if this room runs consistently warm.",
+        "Add attic insulation or reflective film to sun-facing windows.",
+        "Schedule a smart thermostat to pre-cool this room before peak hours."
+      ],
+      red_flags: ["Indoor temperature staying above 32 °C (90 °F) for hours with AC running."]
+    },
+    low: {
+      likely_causes: ["Drafts from windows or doors", "Heater not reaching this room", "Poor insulation"],
+      environment_questions: [
+        "Which room is this sensor in?",
+        "Is there a window or door nearby that might be drafty?",
+        "Does the heater (vent / radiator) reach this room?",
+        "Is the room used often, or mostly empty?"
+      ],
+      quick_fixes: [
+        "Close any open windows and check door seals.",
+        "Run a space heater on low if the room is being used.",
+        "Make sure heating vents in this room are open."
+      ],
+      deeper_fixes: ["Weatherstrip drafty windows and doors.", "Add insulation if the room shares an exterior wall."],
+      red_flags: []
+    }
+  },
+  humidity: {
+    high: {
+      likely_causes: [
+        "Recent showering or cooking without exhaust fan",
+        "Wet laundry drying indoors",
+        "Bathroom/kitchen exhaust fan broken or missing",
+        "Slow leak hidden in walls or under sink",
+        "Outdoor humidity is high and windows are open"
+      ],
+      environment_questions: [
+        "Which room is this sensor in (bathroom, kitchen, basement, bedroom)?",
+        "Has anything been damp recently — wet towels, laundry drying inside, or a recent shower?",
+        "Is there an exhaust fan in this room, and does it work?",
+        "Have you noticed any musty smell or discoloration on walls/ceiling?"
+      ],
+      quick_fixes: [
+        "Run the exhaust fan for 20–30 minutes after showers or cooking.",
+        "Move wet laundry outside or to a dryer.",
+        "Run a dehumidifier; empty it daily until levels drop."
+      ],
+      deeper_fixes: [
+        "Install or repair the bathroom/kitchen exhaust fan.",
+        "Check under sinks and around appliances for slow leaks.",
+        "Add a whole-home dehumidifier if multiple rooms read high."
+      ],
+      red_flags: [
+        "Musty smell + visible discoloration → possible mold; inspect drywall/insulation soon.",
+        "Humidity stays above 70% for days with no obvious source → hidden leak suspected."
+      ]
+    },
+    low: {
+      likely_causes: ["Heating system drying the air in winter"],
+      environment_questions: ["Are you running the heater a lot right now?", "Is anyone in the house getting dry skin or static shocks?"],
+      quick_fixes: ["Run a small humidifier in occupied rooms."],
+      deeper_fixes: ["Consider a whole-home humidifier on the HVAC system."],
+      red_flags: []
+    }
+  },
+  moisture: {
+    high: {
+      likely_causes: [
+        "Spilled water or recent cleaning nearby",
+        "Slow drip from a pipe fitting or appliance hose",
+        "Rain or snow melt seeping in through a wall/floor",
+        "Condensation from a cold pipe or AC line",
+        "Hidden leak inside a wall or under flooring"
+      ],
+      environment_questions: [
+        "Where is this sensor placed — near a pipe, appliance, basement floor, or outside wall?",
+        "Has there been any plumbing work, dishwasher/washer run, or rain recently?",
+        "Do you see any visible water, staining, or warping of nearby flooring?",
+        "Does the area smell musty or damp?"
+      ],
+      quick_fixes: [
+        "Inspect the sensor's immediate area for visible water and dry it.",
+        "Check the nearest pipe joints, valve, and appliance hose for slow drips.",
+        "Place a dry paper towel under the sensor and check it in 24h."
+      ],
+      deeper_fixes: [
+        "If the paper towel is wet again with no spill, call a plumber to inspect for a hidden leak.",
+        "Improve drainage around the foundation if water is seeping through a basement wall.",
+        "Re-caulk around tubs/showers/sinks if grout looks dark or soft."
+      ],
+      red_flags: [
+        "Sustained moisture spikes with no obvious cause → hidden plumbing leak; investigate within days, not weeks.",
+        "Moisture + musty smell + dark spots on drywall → likely mold; address quickly."
+      ]
+    },
+    low: {
+      likely_causes: ["Normal dry conditions"],
+      environment_questions: [],
+      quick_fixes: [],
+      deeper_fixes: [],
+      red_flags: []
+    }
+  },
+  vibration: {
+    high: {
+      likely_causes: [
+        "Appliance running on/near the sensor (washer, dryer, HVAC unit, sump pump)",
+        "Unbalanced or aging appliance (loose drum, worn bearings)",
+        "External source: nearby construction, road traffic, train",
+        "Loose mounting of the sensor itself"
+      ],
+      environment_questions: [
+        "What is this sensor attached to or near (appliance, foundation wall, floor joist)?",
+        "Did vibration start suddenly, or has it been building over weeks?",
+        "Is there a specific time of day this spikes (correlates with an appliance cycle)?",
+        "Has any construction or new equipment started nearby recently?"
+      ],
+      quick_fixes: [
+        "Check that the sensor itself is firmly mounted.",
+        "Re-level the appliance closest to the sensor.",
+        "Move the sensor 6–12 inches and recheck — confirms whether it's the source or a real issue."
+      ],
+      deeper_fixes: [
+        "Service the appliance (drum, motor mounts, bearings) if vibration grows over time.",
+        "Add anti-vibration pads under washers/dryers/HVAC units.",
+        "Have an HVAC tech inspect the unit if vibration correlates with cycles."
+      ],
+      red_flags: ["Sudden new vibration on a load-bearing wall or foundation → inspect for structural cause."]
+    },
+    low: { likely_causes: [], environment_questions: [], quick_fixes: [], deeper_fixes: [], red_flags: [] }
+  },
+  power: {
+    high: {
+      likely_causes: [
+        "New high-draw device added to the circuit",
+        "Appliance malfunctioning (compressor short-cycling, heating element stuck on)",
+        "Phantom loads / many devices on standby"
+      ],
+      environment_questions: [
+        "What's plugged into this circuit?",
+        "Did anything new get added recently (space heater, EV charger, server)?",
+        "Does the spike happen at a regular time (suggests a cycling appliance)?"
+      ],
+      quick_fixes: [
+        "Unplug non-essential devices and watch the meter.",
+        "Identify and unplug the highest-draw item briefly to confirm the source."
+      ],
+      deeper_fixes: [
+        "Move high-draw appliances to a dedicated circuit.",
+        "Have an electrician inspect if you suspect a short or wiring fault."
+      ],
+      red_flags: ["Warm outlet covers, burning smell, or breaker trips → electrical hazard, address immediately."]
+    },
+    low: { likely_causes: [], environment_questions: [], quick_fixes: [], deeper_fixes: [], red_flags: [] }
+  }
+}
+
+/**
+ * Pick the right playbook branch ("high" vs "low") for the current sensor
+ * based on which side of the threshold is being exceeded (or could be).
+ */
+function pickPlaybookFor(sensorType, thresholds) {
+  const key = String(sensorType || "").toLowerCase()
+  const book = REMEDIATION_PLAYBOOKS[key]
+  if (!book) return null
+  const hasHigh = thresholds?.critical_max !== null && thresholds?.critical_max !== undefined
+  const hasLow = thresholds?.critical_min !== null && thresholds?.critical_min !== undefined
+  if (hasHigh && hasLow) return { sensor_type: key, sides: { high: book.high, low: book.low } }
+  if (hasHigh) return { sensor_type: key, sides: { high: book.high } }
+  if (hasLow) return { sensor_type: key, sides: { low: book.low } }
+  // No threshold configured yet — default to the "high" branch since that's
+  // the common case (temperature/humidity/vibration/power).
+  return { sensor_type: key, sides: { high: book.high } }
+}
+
+/**
+ * Detect whether the user is asking "how do I fix/improve this?" rather than
+ * "what's happening?". This lets the prompt switch into advisor mode and
+ * proactively ask clarifying environment questions when needed.
+ */
+function classifyAdvisoryIntent(question) {
+  const q = String(question || "").trim().toLowerCase()
+  if (!q) return false
+  const advisoryPatterns = [
+    /\bhow\s+(?:can|do)\s+i\b/,
+    /\bwhat\s+(?:can|should)\s+i\s+do\b/,
+    /\bhow\s+to\s+(?:fix|reduce|lower|raise|improve|stop|prevent|address)\b/,
+    /\b(?:fix|solve|reduce|lower|improve|stop|prevent|address|remediate)\b/,
+    /\bcritical\s+(?:condition|event|reading)s?\b/,
+    /\b(?:help|advice|recommend(?:ation)?|action)s?\b/,
+    /\bwhat\s+(?:do|should)\s+i\b/,
+    /\bshould\s+i\s+(?:worry|be\s+worried|call|do)\b/
+  ]
+  return advisoryPatterns.some((re) => re.test(q))
+}
+
+/**
  * Build the structured `facts` block the model is required to quote from.
  * This is the single biggest lever for getting specific (not generic) answers.
  *
@@ -935,6 +1167,18 @@ function enforceQuestionAwareInsight(insight, question, fallbackSummary) {
     safeInsight.actions = safeInsight.recommendations.map((text) => ({ severity: "info", text }))
   }
 
+  // follow_ups: short clarifying questions the agent wants the user to answer
+  // next. Rendered as clickable suggestion chips in the UI; clicking a chip
+  // re-asks the agent with that question.
+  if (Array.isArray(safeInsight.follow_ups)) {
+    safeInsight.follow_ups = safeInsight.follow_ups
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .slice(0, 4)
+  } else {
+    safeInsight.follow_ups = []
+  }
+
   // Highlight: { device_id, start_iso, end_iso, reason } — used by the chart
   // to draw a tinted band over the time range the AI is talking about.
   if (safeInsight.highlight && typeof safeInsight.highlight === "object") {
@@ -1093,6 +1337,7 @@ function buildDeterministicInsight(
     ],
     actions,
     recommendations: actions.map((a) => a.text),
+    follow_ups: [],
     highlight: null,
     answer: answerText,
     trend: {
@@ -1110,14 +1355,15 @@ async function generateOpenAIInsight(context, question) {
       {
         type: "input_text",
         text:
-          "You are HomeSense's sensor advisor. You analyze a user's IoT sensor data and recommend concrete actions. " +
-          "You only answer questions about: sensor readings, alerts, leak/moisture/temperature/vibration/humidity risk, " +
-          "device behavior, environmental trends, and what the user should do about them. " +
-          "Anything else (weather forecasts, news, general knowledge, plants, pets, code help, recipes, jokes) is out of scope."
+          "You are the HomeSense Agent — a household conditions advisor. You help the user understand their sensor " +
+          "readings AND fix problems in their home. You speak like a knowledgeable handy friend: specific, calm, and " +
+          "useful. You only answer questions about: sensor readings, alerts, leak/moisture/temperature/vibration/" +
+          "humidity/power risk, device behavior, environmental trends, and concrete remediation. Anything else " +
+          "(weather forecasts, news, general knowledge, plants, pets, code help, recipes, jokes) is out of scope."
       },
       {
         type: "input_text",
-        text: `User question: ${question || "(no question — give a proactive summary of this device's state and the most important action right now)"}`
+        text: `User question: ${question || "(no question — give a proactive summary of this device's state and the single most important action right now)"}`
       },
       {
         type: "input_text",
@@ -1127,9 +1373,20 @@ async function generateOpenAIInsight(context, question) {
           "2. When you make a claim about a number, you MUST quote the exact value AND its timestamp from facts (e.g. \"vibration peaked at 1.42 at 2026-05-11T19:18:00Z\").\n" +
           "3. When you reference a time window (a peak, an event, a streak), you MUST also set `highlight` so the chart can mark that range. Pick the tightest window that supports your claim (e.g. ±15 minutes around an event, or the streak's started_at..ended_at).\n" +
           "4. Format timestamps in `answer` for humans (\"7:18 PM\" or \"Tuesday at 7:18 PM\") — but `highlight.start_iso` and `highlight.end_iso` MUST be raw ISO strings copied from facts.\n" +
-          "5. Always end with 1–3 prioritized actions. Each action has a severity: 'critical' (do now), 'warning' (do this week), or 'info' (good practice).\n" +
-          "6. If `facts.critical_events_last_24h` is 0 AND no other concerning fact is present, say so plainly — do NOT manufacture risk.\n" +
-          "7. If the question is out of scope (anything not about this device's sensor data, alerts, or recommended action), set `is_on_topic` to false and put a brief refusal in `answer`. Leave `key_points` and `actions` empty in that case."
+          "5. If `facts.critical_events_last_24h` is 0 AND no other concerning fact is present, say so plainly — do NOT manufacture risk.\n" +
+          "6. If the question is out of scope (anything not about this device's sensor data, alerts, or recommended action), set `is_on_topic` to false and put a brief refusal in `answer`. Leave `key_points`, `actions`, and `follow_ups` empty in that case.\n" +
+          "\n" +
+          "ADVISOR RULES — when the user asks how to fix/improve, OR when critical events exist:\n" +
+          "A. Tailor recommendations to the sensor type using `playbook.sides.*` (likely_causes, quick_fixes, deeper_fixes, red_flags). Do not give moisture advice for a temperature sensor or vice versa.\n" +
+          "B. Convert the playbook items into specific, prioritized actions for the user's situation — don't just paste them verbatim. Reference the actual readings when you do (e.g. 'Since humidity is sitting at 78% (peak 82% at 6:14 PM), run the bathroom exhaust fan after showers for 30 min.').\n" +
+          "C. Severity guide: 'critical' = do today (risk of damage, mold, or hazard), 'warning' = do this week, 'info' = good practice / preventative.\n" +
+          "D. If a playbook `red_flags` entry applies based on facts (e.g. sustained high readings, no obvious cause, musty conditions implied), surface it as a critical action.\n" +
+          "E. Always return 1–3 actions. More than 3 is overwhelming.\n" +
+          "\n" +
+          "FOLLOW-UP QUESTIONS — `follow_ups` field:\n" +
+          "F. If you don't have enough context about the home environment to give a strong recommendation (room type, ventilation, recent activity, what's near the sensor, what's plugged in, etc.), ASK 2–3 short follow-up questions in `follow_ups`. Pull them from `playbook.sides.*.environment_questions` but rephrase them naturally and keep each under 80 characters.\n" +
+          "G. Do not ask follow-ups when the user only wants observation/analysis (e.g. 'what was the peak?', 'is it trending up?'). Use follow-ups only when remediation depends on missing context.\n" +
+          "H. If the user already answered an environment question in a prior conversation turn (see `conversation_memory`), don't ask it again."
       },
       {
         type: "input_text",
@@ -1153,8 +1410,9 @@ async function generateOpenAIInsight(context, question) {
               "  summary: string — 1-2 short sentences citing at least one specific value+timestamp from facts.\n" +
               "  answer: string — direct response to the user's question, starting with 'To answer your question'. MUST quote exact numbers and human-readable times from facts.\n" +
               "  key_points: string[] — 2-4 short bullets, each anchored on a specific fact (e.g. 'Peak last 24h: 30.9 °C at 7:18 PM').\n" +
-              "  actions: { severity: 'critical'|'warning'|'info', text: string }[] — 1-3 prioritized next steps.\n" +
+              "  actions: { severity: 'critical'|'warning'|'info', text: string }[] — 1-3 prioritized next steps tailored to the sensor type from `playbook`.\n" +
               "  recommendations: string[] — same texts as actions (for backward compatibility).\n" +
+              "  follow_ups: string[] — 0-3 short clarifying questions about the user's environment (room type, airflow, what's nearby, recent activity). Empty array unless remediation depends on missing context.\n" +
               "  highlight: { device_id: number, start_iso: string, end_iso: string, reason: string } | null — the chart will mark this time window. Set null only if your answer truly does not reference a specific time range.\n" +
               "  trend: { direction: 'up'|'down'|'flat', percent_change: number|null } — based on facts.comparison_this_week_vs_last_week.\n" +
               "Never invent timestamps. Never invent values. Never repeat the same sentence template across responses."
@@ -2351,6 +2609,15 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
       }
     })
 
+    // Remediation playbook for THIS sensor type (so the model gives moisture
+    // advice for moisture sensors, temperature advice for temperature sensors,
+    // etc.) plus an advisory-intent flag so the model knows when to switch
+    // into "how do I fix this?" mode.
+    const sensorTypeForPlaybook =
+      device.sensor_type || latestReading?.sensor_type || recentReadings[recentReadings.length - 1]?.sensor_type
+    const playbook = pickPlaybookFor(sensorTypeForPlaybook, thresholds)
+    const isAdvisory = classifyAdvisoryIntent(question)
+
     const context = {
       // What chart the user is currently looking at — helps the model pick a
       // sensible highlight window.
@@ -2361,6 +2628,11 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
       },
       facts,
       fleet,
+      playbook,
+      intent: {
+        is_advisory: isAdvisory,
+        has_active_critical: facts.critical_events_last_24h > 0
+      },
       computed_metrics: {
         samples_7d: recentReadings.length,
         avg_7d: average(recentReadings.map((r) => r.value)),
@@ -2392,23 +2664,28 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
         insight: {
           is_on_topic: true,
           summary:
-            "I can interpret this device's sensor data, peaks, alerts, and what to do about them.",
+            "I can interpret this device's sensor data, peaks, alerts, and tell you what to do about them.",
           key_points: [
             "Ask about a specific time window (\"What was the peak last night?\").",
             "Ask about trend (\"Is moisture trending up this week?\").",
-            "Ask for action (\"Should I be worried? What should I check?\")."
+            "Ask for fixes (\"What can I do to improve the critical readings?\")."
           ],
           actions: [
             { severity: "info", text: "Try: 'What was the highest reading in the last 24 hours and when?'" },
-            { severity: "info", text: "Try: 'Should I be worried about the trend? What should I check first?'" }
+            { severity: "info", text: "Try: 'What can I do to improve the critical conditions on this sensor?'" }
           ],
           recommendations: [
             "Try: 'What was the highest reading in the last 24 hours and when?'",
-            "Try: 'Should I be worried about the trend? What should I check first?'"
+            "Try: 'What can I do to improve the critical conditions on this sensor?'"
+          ],
+          follow_ups: [
+            "What was the highest reading in the last 24 hours and when?",
+            "What can I do to improve the critical conditions on this sensor?",
+            "Should I be worried about the recent trend?"
           ],
           highlight: null,
           answer:
-            "Hi! Ask me a data question about this device and I'll cite specific readings, mark the relevant time range on the chart, and tell you what to do next.",
+            "Hi! Ask me about this device's readings, or ask how to improve conditions — I'll cite specific values, mark the relevant time range on the chart, and walk you through what to check.",
           trend: { direction: "flat", percent_change: null }
         },
         source: "openai"
