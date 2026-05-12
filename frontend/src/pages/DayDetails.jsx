@@ -41,6 +41,12 @@ function formatAlertLevel(level) {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
+function formatSensorType(sensorType) {
+  const s = String(sensorType || "").trim()
+  if (!s) return "—"
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()
+}
+
 function thresholdFor(sensorType, unit) {
   const t = String(sensorType || "").toLowerCase()
   if (t === "temperature") {
@@ -320,25 +326,25 @@ function DayDetails({ darkMode, setDarkMode }) {
 
   const selectedMode = VIEW_MODES.find((m) => m.id === viewMode) || VIEW_MODES[0]
   const threshold = selectedMode.metric === "readings" ? thresholdFor(device?.sensor_type, device?.unit) : null
-  const criticalYAxisMax = useMemo(() => {
-    if (selectedMode.metric !== "critical_counts") return 20
+  const criticalYAxis = useMemo(() => {
+    if (selectedMode.metric !== "critical_counts") return null
     const peak = readings.reduce(
       (max, r) => (typeof r?.value === "number" && r.value > max ? r.value : max),
       0
     )
-    return Math.max(20, Math.ceil(peak / 2) * 2)
+    // Always show at least 0..10 so an empty/idle chart still has scale.
+    // Pick a nice round step targeting ~6 visible ticks regardless of magnitude:
+    //   peak  10  ->  step 2  -> ticks 0,2,4,6,8,10
+    //   peak 107  ->  step 20 -> ticks 0,20,40,60,80,100,120
+    //   peak 7606 -> step 1500 -> ticks 0,1500,...,7500,9000
+    const target = Math.max(10, peak)
+    const step = niceStep(target / 6)
+    const niceMax = Math.max(step, Math.ceil(target / step) * step)
+    return { min: 0, max: niceMax, step }
   }, [selectedMode.metric, readings])
   const chartModel = useMemo(
-    () =>
-      buildChartModel(
-        readings,
-        threshold,
-        viewMode,
-        selectedMode.metric === "critical_counts"
-          ? { min: 0, max: criticalYAxisMax, step: 2 }
-          : null
-      ),
-    [readings, threshold, viewMode, selectedMode.metric, criticalYAxisMax]
+    () => buildChartModel(readings, threshold, viewMode, criticalYAxis),
+    [readings, threshold, viewMode, criticalYAxis]
   )
   const axisTicks = useMemo(
     () => buildAxisTicks(viewMode, chartModel.windowStartMs, chartModel.windowEndMs),
@@ -517,9 +523,6 @@ function DayDetails({ darkMode, setDarkMode }) {
               <strong>Alert:</strong> {device.alert.message}
             </div>
           ) : null}
-          <p className="dd-subtitle text-muted mb-3">
-            Detailed sensor history with a graph-ready view (similar to Grafana drill-down).
-          </p>
 
           <div className="row g-3 mb-3">
             <div className="col-6 col-md-3">
@@ -668,7 +671,7 @@ function DayDetails({ darkMode, setDarkMode }) {
                     <defs>
                       <linearGradient id="ddAreaFill" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#8ed091" stopOpacity="0.55" />
-                        <stop offset="100%" stopColor="#2f7a3b" stopOpacity="0.05" />
+                        <stop offset="100%" stopColor="#6fbf73" stopOpacity="0.20" />
                       </linearGradient>
                     </defs>
                     {chartModel.yTicks.map((tick) => {
@@ -758,7 +761,7 @@ function DayDetails({ darkMode, setDarkMode }) {
                     </div>
                     <div className="small text-muted">
                       {selectedMode.metric === "readings"
-                        ? `${device?.sensor_type || "sensor"} at ${formatTimestamp(device?.latest_recorded_at)}`
+                        ? `${formatSensorType(device?.sensor_type) !== "—" ? formatSensorType(device?.sensor_type) : "Sensor"} at ${formatTimestamp(device?.latest_recorded_at)}`
                         : `${queryMeta?.resolution || "bucket"} aggregation across ${queryMeta?.range || "range"}`}
                     </div>
                   </div>
@@ -774,7 +777,7 @@ function DayDetails({ darkMode, setDarkMode }) {
                   <th>Device</th>
                   <th>{selectedMode.metric === "readings" ? "Sensor type" : "Metric"}</th>
                   <th>Value</th>
-                  <th>Unit</th>
+                  {selectedMode.metric === "readings" ? <th>Unit</th> : null}
                   <th>Recorded at</th>
                 </tr>
               </thead>
@@ -785,9 +788,9 @@ function DayDetails({ darkMode, setDarkMode }) {
                   .map((reading, idx) => (
                     <tr key={`${reading.t || reading.recorded_at}-${idx}`}>
                       <td>{device?.label || "—"}</td>
-                      <td>{selectedMode.metric === "readings" ? reading.sensor_type || "—" : "critical_count"}</td>
+                      <td>{selectedMode.metric === "readings" ? formatSensorType(reading.sensor_type) : "Critical Events"}</td>
                       <td>{formatValue(reading.value)}</td>
-                      <td>{selectedMode.metric === "readings" ? reading.unit || "—" : "events"}</td>
+                      {selectedMode.metric === "readings" ? <td>{reading.unit || "—"}</td> : null}
                       <td>{formatTimestamp(reading.t || reading.recorded_at)}</td>
                     </tr>
                   ))}

@@ -225,10 +225,6 @@ function AccountSettings({ darkMode, setDarkMode }) {
                       placeholder="How we greet you on the dashboard"
                       disabled={savingProfile}
                     />
-                    <small className="form-text text-muted">
-                      Shown in “Welcome back” on the dashboard. Leave blank to use your email
-                      instead.
-                    </small>
                   </div>
 
                   <div className="form-group">
