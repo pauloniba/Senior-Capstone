@@ -167,7 +167,7 @@
 }
 
 /* ==========================================================================
-   Device list — each row a pill-tag-decorated card row
+   Devices — each row a pill-tag-decorated card row
    ========================================================================== */
 .gf-device-row {
   display: flex !important;

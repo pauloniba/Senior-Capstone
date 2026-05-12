@@ -204,7 +204,7 @@ function Home({ darkMode, setDarkMode }) {
       <section>
         <div className="card shadow-sm">
           <div className="card-header d-flex justify-content-between align-items-center">
-            <span>Device List</span>
+            <span>Devices</span>
             <small className="text-muted">{formatLastUpdated(lastSyncAt)}</small>
           </div>
           <div className="card-body">
