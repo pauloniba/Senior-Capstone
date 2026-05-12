@@ -232,6 +232,107 @@
   line-height: 1.55;
 }
 
+/* AI focus call-out: the agent told us which time range on the chart it's
+   talking about. We show a tiny breadcrumb-ish line so the user can connect
+   the prose answer to the highlighted band on the SVG above. */
+.dd-ai-highlight-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--r-pill);
+  background: var(--accent-50);
+  border: 1px solid var(--accent-200);
+  color: var(--text-secondary);
+  font-size: var(--t-tiny);
+  letter-spacing: 0.02em;
+}
+
+.dd-ai-highlight-note::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-100);
+}
+
+/* Severity-tinted action items replace the old plain bullet list of
+   "recommendations". Severity comes from the model; we expect 1-3 items. */
+.dd-ai-actions {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dd-ai-action {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--r-md);
+  background: var(--surface-card-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.dd-ai-action-text {
+  color: var(--text-primary);
+  font-size: var(--t-small);
+  line-height: 1.5;
+}
+
+.dd-ai-action-chip {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.55rem;
+  border-radius: var(--r-pill);
+  font-size: var(--t-tiny);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+}
+
+.dd-ai-action-chip--critical {
+  background: var(--critical-soft);
+  color: var(--critical);
+  border: 1px solid rgba(226, 104, 94, 0.45);
+}
+
+.dd-ai-action-chip--warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+  border: 1px solid rgba(232, 177, 92, 0.45);
+}
+
+.dd-ai-action-chip--info {
+  background: var(--accent-100);
+  color: var(--accent);
+  border: 1px solid var(--accent-200);
+}
+
+.dd-ai-action--critical {
+  border-color: rgba(226, 104, 94, 0.30);
+  background: linear-gradient(180deg, rgba(226, 104, 94, 0.08), transparent 80%), var(--surface-card-elevated);
+}
+
+.dd-ai-action--warning {
+  border-color: rgba(232, 177, 92, 0.30);
+  background: linear-gradient(180deg, rgba(232, 177, 92, 0.08), transparent 80%), var(--surface-card-elevated);
+}
+
+/* Refusal: don't show empty key-points/actions blocks; just the message. */
+.dd-ai-refusal {
+  padding: 0.85rem 1rem;
+  border-radius: var(--r-md);
+  background: var(--surface-card-elevated);
+  border: 1px dashed var(--border-default);
+}
+
 @media (max-width: 767px) {
   .dd-ai-input-row {
     flex-direction: column;

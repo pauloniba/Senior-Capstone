@@ -360,6 +360,33 @@ function DayDetails({ darkMode, setDarkMode }) {
     [chartModel.points, selectedMode.metric, threshold]
   )
 
+  // Highlight band: if the AI's answer references a time window, project that
+  // ISO range onto the SVG x-axis so we can render a tinted band underneath
+  // the line. Returns null when the window falls fully outside the visible
+  // chart or when no highlight is set.
+  const agentHighlightOverlay = useMemo(() => {
+    const h = agentInsight?.highlight
+    if (!h || !h.start_iso || !h.end_iso) return null
+    if (Number.isFinite(h.device_id) && h.device_id !== deviceId) return null
+    const startMs = new Date(h.start_iso).getTime()
+    const endMs = new Date(h.end_iso).getTime()
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null
+    const { windowStartMs, windowEndMs } = chartModel
+    if (!Number.isFinite(windowStartMs) || !Number.isFinite(windowEndMs)) return null
+    if (endMs < windowStartMs || startMs > windowEndMs) return null
+    const span = Math.max(windowEndMs - windowStartMs, 1)
+    const usableW = CHART_WIDTH - CHART_PADDING - CHART_LEFT_GUTTER
+    const clamp = (t) => Math.min(1, Math.max(0, (t - windowStartMs) / span))
+    const xStart = CHART_LEFT_GUTTER + clamp(startMs) * usableW
+    const xEnd = CHART_LEFT_GUTTER + clamp(endMs) * usableW
+    const width = Math.max(xEnd - xStart, 4)
+    return {
+      x: xStart,
+      width,
+      reason: h.reason || null
+    }
+  }, [agentInsight, chartModel, deviceId])
+
   async function requestInsight(customQuestion = "") {
     const raw = localStorage.getItem("homesense_user")
     let userId = null
@@ -375,8 +402,18 @@ function DayDetails({ darkMode, setDarkMode }) {
     setAgentLoading(true)
     setAgentError("")
     try {
+      // Tell the backend which chart range the user is currently looking at —
+      // the agent uses this to pick a sensible highlight window when its answer
+      // references a specific time.
       const data = await fetchAgentInsights(userId, deviceId, {
-        question: customQuestion || undefined
+        question: customQuestion || undefined,
+        view_mode: viewMode,
+        range_start_iso: Number.isFinite(chartModel.windowStartMs)
+          ? new Date(chartModel.windowStartMs).toISOString()
+          : null,
+        range_end_iso: Number.isFinite(chartModel.windowEndMs)
+          ? new Date(chartModel.windowEndMs).toISOString()
+          : null
       })
       setAgentInsight(data?.insight || null)
       setAgentSource(data?.source || "")
@@ -605,33 +642,97 @@ function DayDetails({ darkMode, setDarkMode }) {
               {agentInsight ? (
                 <div className="dd-ai-result">
                   <div className="small text-muted dd-ai-source">
-                    Source: {agentSource === "openai" ? "OpenAI" : "Rule-based fallback"}
+                    Source:{" "}
+                    {agentSource === "openai"
+                      ? "OpenAI"
+                      : agentSource === "refusal"
+                        ? "Out of scope"
+                        : "Rule-based fallback"}
                   </div>
-                  {agentInsight.answer ? (
-                    <p className="mb-2">
-                      <strong>Answer:</strong> {agentInsight.answer}
-                    </p>
+                  {agentInsight.is_on_topic === false ? (
+                    <div className="dd-ai-refusal mt-2">
+                      <p className="mb-2">
+                        <strong>Answer:</strong>{" "}
+                        {agentInsight.answer ||
+                          agentInsight.summary ||
+                          "I can only analyze sensor data and recommend actions for your HomeSense devices."}
+                      </p>
+                      <p className="small text-muted mb-0">
+                        Try asking about peaks, alerts, trends, or what to do about this device.
+                      </p>
+                    </div>
                   ) : (
-                    <p className="mb-2">
-                      <strong>Answer:</strong> {agentInsight.summary || "No answer provided."}
-                    </p>
+                    <>
+                      {agentInsight.answer ? (
+                        <p className="mb-2">
+                          <strong>Answer:</strong> {agentInsight.answer}
+                        </p>
+                      ) : (
+                        <p className="mb-2">
+                          <strong>Answer:</strong> {agentInsight.summary || "No answer provided."}
+                        </p>
+                      )}
+                      {agentInsight.highlight && agentHighlightOverlay ? (
+                        <p className="small text-muted mb-2 dd-ai-highlight-note">
+                          Marked on the chart above
+                          {agentInsight.highlight.reason
+                            ? `: ${agentInsight.highlight.reason}.`
+                            : "."}
+                        </p>
+                      ) : null}
+                      {Array.isArray(agentInsight.key_points) && agentInsight.key_points.length > 0 ? (
+                        <>
+                          <p className="mb-1">
+                            <strong>Key points</strong>
+                          </p>
+                          <ul className="mb-2">
+                            {agentInsight.key_points.map((point, idx) => (
+                              <li key={`${point}-${idx}`}>{point}</li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : null}
+                      {Array.isArray(agentInsight.actions) && agentInsight.actions.length > 0 ? (
+                        <>
+                          <p className="mb-1">
+                            <strong>Recommended actions</strong>
+                          </p>
+                          <ul className="dd-ai-actions mb-0">
+                            {agentInsight.actions.map((action, idx) => {
+                              const severity = action?.severity || "info"
+                              return (
+                                <li
+                                  key={`${action?.text || ""}-${idx}`}
+                                  className={`dd-ai-action dd-ai-action--${severity}`}
+                                >
+                                  <span className={`dd-ai-action-chip dd-ai-action-chip--${severity}`}>
+                                    {severity === "critical"
+                                      ? "Critical"
+                                      : severity === "warning"
+                                        ? "Warning"
+                                        : "Info"}
+                                  </span>
+                                  <span className="dd-ai-action-text">{action?.text}</span>
+                                </li>
+                              )
+                            })}
+                          </ul>
+                        </>
+                      ) : Array.isArray(agentInsight.recommendations) &&
+                        agentInsight.recommendations.length > 0 ? (
+                        <>
+                          <p className="mb-1">
+                            <strong>Recommended actions</strong>
+                          </p>
+                          <ul className="mb-0">
+                            {agentInsight.recommendations.map((item, idx) => (
+                              <li key={`${item}-${idx}`}>{item}</li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : null}
+                    </>
                   )}
-                  <p className="mb-1">
-                    <strong>Key points</strong>
-                  </p>
-                  <ul className="mb-2">
-                    {(agentInsight.key_points || []).map((point, idx) => (
-                      <li key={`${point}-${idx}`}>{point}</li>
-                    ))}
-                  </ul>
-                  <p className="mb-1">
-                    <strong>Recommendation</strong>
-                  </p>
-                  <ul className="mb-0">
-                    {(agentInsight.recommendations || []).map((item, idx) => (
-                      <li key={`${item}-${idx}`}>{item}</li>
-                    ))}
-                  </ul>
                 </div>
               ) : null}
             </div>
@@ -727,6 +828,29 @@ function DayDetails({ darkMode, setDarkMode }) {
                           strokeWidth="1.5"
                         />
                       </>
+                    ) : null}
+                    {agentHighlightOverlay ? (
+                      <g className="dd-chart-ai-highlight">
+                        <rect
+                          x={agentHighlightOverlay.x}
+                          y={CHART_PADDING}
+                          width={agentHighlightOverlay.width}
+                          height={CHART_HEIGHT - CHART_PADDING * 2}
+                          fill="rgba(111, 191, 115, 0.18)"
+                          stroke="rgba(111, 191, 115, 0.55)"
+                          strokeDasharray="3 3"
+                          strokeWidth="1"
+                        />
+                        <text
+                          x={agentHighlightOverlay.x + 4}
+                          y={CHART_PADDING + 12}
+                          fontSize="10"
+                          fill="rgba(142, 208, 145, 0.95)"
+                          fontWeight="600"
+                        >
+                          AI focus
+                        </text>
+                      </g>
                     ) : null}
                     <polygon points={chartModel.areaPath} fill="url(#ddAreaFill)" />
                     <polyline

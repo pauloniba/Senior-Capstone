@@ -502,6 +502,271 @@ function linearForecastNext(readings, points = 6) {
   }
 }
 
+// ============================================================================
+// Agent context helpers
+//
+// The /agent/insights endpoint historically handed the model a wall of raw
+// JSON (2000 points) and a vague "use concrete numbers" instruction. Models
+// are great at quoting facts they've been given as labels, and bad at finding
+// "the peak on Tuesday" inside a raw blob. So we pre-compute the interesting
+// moments (peaks, streaks, jumps, week-over-week, etc.) and feed them as
+// labeled facts the model is required to cite. The model also gets a small
+// fleet summary so it can answer cross-device questions.
+// ============================================================================
+
+/**
+ * Quick off-topic guard. The agent is only supposed to answer questions about
+ * sensor data, alerts, environment, leak/water risk, and recommended actions.
+ * Anything that obviously isn't (weather, news, recipes, code, plants, etc.)
+ * gets caught here so we don't burn an OpenAI call or risk hallucination.
+ *
+ * Returns true if the question looks off-topic.
+ */
+function classifyOffTopic(question) {
+  const q = String(question || "").trim().toLowerCase()
+  if (!q) return false
+  const offTopicPatterns = [
+    /\bweather\b/, /\bforecast\s+for\b/, /\btemperature\s+outside\b/,
+    /\bnews\b/, /\bstocks?\b/, /\bcrypto\b/, /\bbitcoin\b/,
+    /\brecipes?\b/, /\bcook\b/, /\bdinner\b/,
+    /\bplants?\b/, /\bgarden\b/, /\bpet\b/, /\bdog\b/, /\bcat\b/,
+    /\bwrite\s+code\b/, /\bdebug\b/, /\bpython\b/, /\bjavascript\b/,
+    /\bcapital\s+of\b/, /\bpresident\b/, /\bhistory\s+of\b/,
+    /\bjoke\b/, /\bpoem\b/, /\bsong\b/,
+    /\btell\s+me\s+about\s+yourself\b/
+  ]
+  return offTopicPatterns.some((re) => re.test(q))
+}
+
+/**
+ * Convert a value list of {value, recorded_at} into the single peak (the
+ * highest value). Returns null if no usable points.
+ */
+function findPeak(points) {
+  let best = null
+  for (const p of points) {
+    const v = Number(p?.value)
+    if (!Number.isFinite(v)) continue
+    if (!best || v > best.value) {
+      best = { value: v, recorded_at: p.recorded_at || null, sensor_type: p.sensor_type || null, unit: p.unit || null }
+    }
+  }
+  return best
+}
+
+/**
+ * Largest absolute value change between two consecutive readings inside the
+ * given window (defaults to 24h before "now"). Used to call out "vibration
+ * jumped from 0.2 to 1.4 at 7:18 PM" — the kind of specific fact the model
+ * would otherwise miss in a raw blob.
+ */
+function findBiggestJump(points, windowMs = 24 * 60 * 60 * 1000) {
+  const nowMs = Date.now()
+  const inWindow = points
+    .filter((p) => p.recorded_at && nowMs - new Date(p.recorded_at).getTime() <= windowMs)
+    .sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at))
+  let best = null
+  for (let i = 1; i < inWindow.length; i += 1) {
+    const a = inWindow[i - 1]
+    const b = inWindow[i]
+    const av = Number(a.value)
+    const bv = Number(b.value)
+    if (!Number.isFinite(av) || !Number.isFinite(bv)) continue
+    const delta = bv - av
+    if (!best || Math.abs(delta) > Math.abs(best.delta)) {
+      best = {
+        delta: Number(delta.toFixed(3)),
+        from_value: av,
+        to_value: bv,
+        from_at: a.recorded_at,
+        to_at: b.recorded_at
+      }
+    }
+  }
+  return best
+}
+
+/**
+ * Longest consecutive run of readings that crossed the critical threshold.
+ * Threshold semantics match evaluateAlert(): a reading is "above threshold"
+ * if it meets either critical_max (high-side) or critical_min (low-side).
+ */
+function findLongestCriticalStreak(points, thresholds) {
+  if (!thresholds) return null
+  const ordered = [...points].sort(
+    (a, b) => new Date(a.recorded_at) - new Date(b.recorded_at)
+  )
+  const isCritical = (v) =>
+    (thresholds.critical_max !== null && thresholds.critical_max !== undefined && v >= thresholds.critical_max) ||
+    (thresholds.critical_min !== null && thresholds.critical_min !== undefined && v <= thresholds.critical_min)
+
+  let best = null
+  let runStart = null
+  let runCount = 0
+  let runLast = null
+  for (const p of ordered) {
+    const v = Number(p?.value)
+    if (!Number.isFinite(v)) continue
+    if (isCritical(v)) {
+      if (runCount === 0) runStart = p.recorded_at
+      runLast = p.recorded_at
+      runCount += 1
+    } else {
+      if (runCount > 0 && (!best || runCount > best.count)) {
+        best = { count: runCount, started_at: runStart, ended_at: runLast }
+      }
+      runStart = null
+      runLast = null
+      runCount = 0
+    }
+  }
+  if (runCount > 0 && (!best || runCount > best.count)) {
+    best = { count: runCount, started_at: runStart, ended_at: runLast }
+  }
+  return best
+}
+
+/**
+ * Per-day count of critical readings in the last 7 days. Returns an array
+ * sorted oldest -> newest with a `count` per day (zero-filled).
+ */
+function criticalPerDay7d(points, thresholds) {
+  if (!thresholds) return []
+  const nowMs = Date.now()
+  const dayMs = 24 * 60 * 60 * 1000
+  const buckets = new Map()
+  for (let i = 6; i >= 0; i -= 1) {
+    const d = new Date(nowMs - i * dayMs)
+    d.setHours(0, 0, 0, 0)
+    buckets.set(d.toISOString(), 0)
+  }
+  const isCritical = (v) =>
+    (thresholds.critical_max !== null && thresholds.critical_max !== undefined && v >= thresholds.critical_max) ||
+    (thresholds.critical_min !== null && thresholds.critical_min !== undefined && v <= thresholds.critical_min)
+
+  for (const p of points) {
+    const v = Number(p?.value)
+    if (!Number.isFinite(v) || !isCritical(v) || !p.recorded_at) continue
+    const ts = new Date(p.recorded_at)
+    ts.setHours(0, 0, 0, 0)
+    const key = ts.toISOString()
+    if (buckets.has(key)) buckets.set(key, buckets.get(key) + 1)
+  }
+  return Array.from(buckets.entries()).map(([date, count]) => ({ date, count }))
+}
+
+/**
+ * Build the structured `facts` block the model is required to quote from.
+ * This is the single biggest lever for getting specific (not generic) answers.
+ *
+ * Every field that survives into the prompt should be:
+ *   - small (no raw point lists)
+ *   - already-computed (the model just quotes it)
+ *   - timestamped (so claims can be tied to a chart range)
+ */
+function buildAgentFacts({
+  device,
+  thresholds,
+  recentReadings,
+  dailyTrend14d,
+  daily90d,
+  monthly12m
+}) {
+  const nowMs = Date.now()
+  const dayMs = 24 * 60 * 60 * 1000
+
+  const last24h = recentReadings.filter(
+    (r) => r.recorded_at && nowMs - new Date(r.recorded_at).getTime() <= dayMs
+  )
+  const last7d = recentReadings
+
+  const peak24h = findPeak(last24h)
+  const peak7d = findPeak(last7d)
+
+  const criticalEvents7d = thresholds
+    ? last7d.filter((r) => {
+        const v = Number(r.value)
+        if (!Number.isFinite(v)) return false
+        return (
+          (thresholds.critical_max !== null && thresholds.critical_max !== undefined && v >= thresholds.critical_max) ||
+          (thresholds.critical_min !== null && thresholds.critical_min !== undefined && v <= thresholds.critical_min)
+        )
+      })
+    : []
+  const criticalEvents24h = criticalEvents7d.filter(
+    (r) => r.recorded_at && nowMs - new Date(r.recorded_at).getTime() <= dayMs
+  )
+  const latestCriticalEvent =
+    criticalEvents7d.length > 0
+      ? criticalEvents7d
+          .slice()
+          .sort((a, b) => new Date(b.recorded_at) - new Date(a.recorded_at))[0]
+      : null
+
+  // Week-over-week using the 14-day daily aggregate (7 newest vs 7 prior).
+  const sortedDaily = [...dailyTrend14d].sort(
+    (a, b) => new Date(a.day_bucket) - new Date(b.day_bucket)
+  )
+  const lastWeek = sortedDaily.slice(-7).map((d) => Number(d.avg_value)).filter(Number.isFinite)
+  const priorWeek = sortedDaily.slice(-14, -7).map((d) => Number(d.avg_value)).filter(Number.isFinite)
+  const lastWeekAvg = average(lastWeek)
+  const priorWeekAvg = average(priorWeek)
+  const wow = classifyTrend(priorWeekAvg, lastWeekAvg)
+
+  // Year-over-year only meaningful when monthly history is long enough.
+  let yoy = null
+  if (monthly12m && monthly12m.length >= 13) {
+    const sortedM = [...monthly12m].sort(
+      (a, b) => new Date(a.month_bucket) - new Date(b.month_bucket)
+    )
+    const thisYear = sortedM.slice(-12).map((d) => Number(d.avg_value)).filter(Number.isFinite)
+    const lastYear = sortedM.slice(-24, -12).map((d) => Number(d.avg_value)).filter(Number.isFinite)
+    const thisYearAvg = average(thisYear)
+    const lastYearAvg = average(lastYear)
+    if (thisYearAvg !== null && lastYearAvg !== null) {
+      yoy = {
+        this_year_avg: Number(thisYearAvg.toFixed(3)),
+        last_year_avg: Number(lastYearAvg.toFixed(3)),
+        delta_pct:
+          lastYearAvg !== 0 ? Number((((thisYearAvg - lastYearAvg) / Math.abs(lastYearAvg)) * 100).toFixed(2)) : null
+      }
+    }
+  }
+
+  return {
+    device: {
+      id: device?.id,
+      name: device?.name,
+      label: friendlyDeviceDisplayName(device?.name, device?.device_uid),
+      sensor_type: device?.sensor_type || null,
+      unit: device?.unit || null
+    },
+    thresholds: thresholds || null,
+    peak_24h: peak24h,
+    peak_7d: peak7d,
+    latest_critical_event: latestCriticalEvent
+      ? {
+          value: Number(latestCriticalEvent.value),
+          recorded_at: latestCriticalEvent.recorded_at
+        }
+      : null,
+    critical_events_last_24h: criticalEvents24h.length,
+    critical_events_last_7d: criticalEvents7d.length,
+    critical_events_per_day_last_7d: criticalPerDay7d(last7d, thresholds),
+    biggest_jump_last_24h: findBiggestJump(last7d, dayMs),
+    longest_critical_streak: findLongestCriticalStreak(last7d, thresholds),
+    comparison_this_week_vs_last_week: {
+      this_week_avg: lastWeekAvg !== null ? Number(lastWeekAvg.toFixed(3)) : null,
+      last_week_avg: priorWeekAvg !== null ? Number(priorWeekAvg.toFixed(3)) : null,
+      direction: wow.direction,
+      delta_pct: wow.percentChange !== null ? Number(wow.percentChange.toFixed(2)) : null
+    },
+    comparison_this_year_vs_last_year: yoy,
+    daily_summary_last_90d: (daily90d || []).slice(-90),
+    monthly_summary_last_12m: (monthly12m || []).slice(-12)
+  }
+}
+
 function computeAdvancedAnalytics(recentReadings, dailyTrendRows, sensorType) {
   const nowMs = Date.now()
   const weekMs = 7 * 24 * 60 * 60 * 1000
@@ -618,6 +883,9 @@ function enforceQuestionAwareInsight(insight, question, fallbackSummary) {
   const safeInsight = insight && typeof insight === "object" ? { ...insight } : {}
   const q = String(question || "").trim()
 
+  // is_on_topic defaults to true unless the model explicitly flagged it false.
+  safeInsight.is_on_topic = safeInsight.is_on_topic === false ? false : true
+
   if (Array.isArray(safeInsight.key_points)) {
     safeInsight.key_points = safeInsight.key_points
       .map((item) => String(item || "").trim())
@@ -627,13 +895,68 @@ function enforceQuestionAwareInsight(insight, question, fallbackSummary) {
     safeInsight.key_points = []
   }
 
+  // New: structured actions with severity. Keep `recommendations` as a flat
+  // string array for backward compatibility with older UI builds.
+  const allowedSeverities = new Set(["critical", "warning", "info"])
+  if (Array.isArray(safeInsight.actions)) {
+    safeInsight.actions = safeInsight.actions
+      .map((a) => {
+        if (!a) return null
+        if (typeof a === "string") {
+          return { severity: "info", text: a.trim() }
+        }
+        const text = String(a.text || "").trim()
+        if (!text) return null
+        const severity = allowedSeverities.has(String(a.severity || "").toLowerCase())
+          ? String(a.severity).toLowerCase()
+          : "info"
+        return { severity, text }
+      })
+      .filter(Boolean)
+      .slice(0, 3)
+  } else {
+    safeInsight.actions = []
+  }
+
   if (Array.isArray(safeInsight.recommendations)) {
     safeInsight.recommendations = safeInsight.recommendations
       .map((item) => String(item || "").trim())
       .filter(Boolean)
-      .slice(0, 2)
+      .slice(0, 3)
   } else {
     safeInsight.recommendations = []
+  }
+  // Mirror actions -> recommendations so older clients keep working.
+  if (safeInsight.recommendations.length === 0 && safeInsight.actions.length > 0) {
+    safeInsight.recommendations = safeInsight.actions.map((a) => a.text)
+  }
+  // And the other way around if the model only returned recommendations.
+  if (safeInsight.actions.length === 0 && safeInsight.recommendations.length > 0) {
+    safeInsight.actions = safeInsight.recommendations.map((text) => ({ severity: "info", text }))
+  }
+
+  // Highlight: { device_id, start_iso, end_iso, reason } — used by the chart
+  // to draw a tinted band over the time range the AI is talking about.
+  if (safeInsight.highlight && typeof safeInsight.highlight === "object") {
+    const h = safeInsight.highlight
+    const start = h.start_iso || h.start || null
+    const end = h.end_iso || h.end || null
+    const reason = String(h.reason || "").trim() || null
+    const deviceId = Number.isFinite(Number(h.device_id)) ? Number(h.device_id) : null
+    const startMs = start ? new Date(start).getTime() : NaN
+    const endMs = end ? new Date(end).getTime() : NaN
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs) {
+      safeInsight.highlight = {
+        device_id: deviceId,
+        start_iso: new Date(startMs).toISOString(),
+        end_iso: new Date(endMs).toISOString(),
+        reason
+      }
+    } else {
+      safeInsight.highlight = null
+    }
+  } else {
+    safeInsight.highlight = null
   }
 
   if (q) {
@@ -653,6 +976,29 @@ function enforceQuestionAwareInsight(insight, question, fallbackSummary) {
   }
 
   return safeInsight
+}
+
+/**
+ * Canned refusal payload for clearly off-topic questions. We short-circuit to
+ * this so we don't burn an OpenAI call and so users see a consistent message
+ * instead of the model trying its best to invent an answer.
+ */
+function buildRefusalInsight(question, deviceLabel) {
+  const q = String(question || "").trim()
+  return {
+    is_on_topic: false,
+    summary:
+      "I can only analyze sensor data and recommend actions for your HomeSense devices.",
+    answer:
+      `That's outside what I can help with. I'm built to look at this device's readings, alerts, and trends — ` +
+      `try asking about ${deviceLabel || "your device"} instead (for example: "What was the peak in the last 24 hours?" ` +
+      `or "Should I be worried about the recent trend?").`,
+    key_points: [],
+    actions: [],
+    recommendations: [],
+    highlight: null,
+    trend: { direction: "flat", percent_change: null }
+  }
 }
 
 function buildDeterministicInsight(
@@ -713,7 +1059,21 @@ function buildDeterministicInsight(
       }.`
     : null
 
+  const actions = [
+    {
+      severity: modeledRisk === "high" ? "critical" : modeledRisk === "medium" ? "warning" : "info",
+      text: "Check this device again in 24 hours and compare against alert history."
+    },
+    {
+      severity: "info",
+      text:
+        trend.direction === "up"
+          ? "If readings keep rising for 2 more days, inspect nearby pipes/fittings or move the sensor to confirm."
+          : "Trend looks stable — keep monitoring weekly."
+    }
+  ]
   return {
+    is_on_topic: true,
     summary: `For ${deviceName}, the ${sensorType} sensor currently reads ${
       latestValue !== null ? `${latestValue}${unit ? ` ${unit}` : ""}` : "no recent value"
     }. ${trendText} Risk is ${modeledRisk}${
@@ -729,14 +1089,11 @@ function buildDeterministicInsight(
           : "n/a"
       }`,
       trendText,
-      latestDeltaText,
-      `Estimated risk level: ${modeledRisk}.`,
-      Number.isFinite(modeledScore) ? `Leak risk score: ${modeledScore}/100.` : "Leak risk score: n/a."
+      latestDeltaText
     ],
-    recommendations: [
-      "Check this device again in 24 hours and compare against alerts.",
-      "If readings keep rising for 2 days, inspect nearby pipes/fittings."
-    ],
+    actions,
+    recommendations: actions.map((a) => a.text),
+    highlight: null,
     answer: answerText,
     trend: {
       direction: trend.direction,
@@ -753,15 +1110,26 @@ async function generateOpenAIInsight(context, question) {
       {
         type: "input_text",
         text:
-          "You are an IoT monitoring analyst. Explain sensor behavior in plain language for non-technical customers. " +
-          "Focus on trend direction, risk level, and practical next steps. If water leak/moisture is trending up, call it out clearly. " +
-          "Use concrete numbers from the provided data and avoid generic repeated wording. " +
-          "Tailor the response to the exact user question and avoid repeating the same sentence templates between calls. " +
-          "Use prior conversation turns to maintain continuity and answer follow-up questions directly."
+          "You are HomeSense's sensor advisor. You analyze a user's IoT sensor data and recommend concrete actions. " +
+          "You only answer questions about: sensor readings, alerts, leak/moisture/temperature/vibration/humidity risk, " +
+          "device behavior, environmental trends, and what the user should do about them. " +
+          "Anything else (weather forecasts, news, general knowledge, plants, pets, code help, recipes, jokes) is out of scope."
       },
       {
         type: "input_text",
-        text: `Question: ${question || "Provide a proactive insight summary for this device."}`
+        text: `User question: ${question || "(no question — give a proactive summary of this device's state and the most important action right now)"}`
+      },
+      {
+        type: "input_text",
+        text:
+          "GROUNDING RULES — you MUST follow these:\n" +
+          "1. Use only the facts inside `facts.*` and `fleet.*`. Do not invent values, timestamps, or events that are not in the JSON.\n" +
+          "2. When you make a claim about a number, you MUST quote the exact value AND its timestamp from facts (e.g. \"vibration peaked at 1.42 at 2026-05-11T19:18:00Z\").\n" +
+          "3. When you reference a time window (a peak, an event, a streak), you MUST also set `highlight` so the chart can mark that range. Pick the tightest window that supports your claim (e.g. ±15 minutes around an event, or the streak's started_at..ended_at).\n" +
+          "4. Format timestamps in `answer` for humans (\"7:18 PM\" or \"Tuesday at 7:18 PM\") — but `highlight.start_iso` and `highlight.end_iso` MUST be raw ISO strings copied from facts.\n" +
+          "5. Always end with 1–3 prioritized actions. Each action has a severity: 'critical' (do now), 'warning' (do this week), or 'info' (good practice).\n" +
+          "6. If `facts.critical_events_last_24h` is 0 AND no other concerning fact is present, say so plainly — do NOT manufacture risk.\n" +
+          "7. If the question is out of scope (anything not about this device's sensor data, alerts, or recommended action), set `is_on_topic` to false and put a brief refusal in `answer`. Leave `key_points` and `actions` empty in that case."
       },
       {
         type: "input_text",
@@ -772,7 +1140,7 @@ async function generateOpenAIInsight(context, question) {
 
   const requestBody = (model) => ({
     model,
-    temperature: 0.55,
+    temperature: 0.35,
     input: [
       {
         role: "system",
@@ -780,9 +1148,16 @@ async function generateOpenAIInsight(context, question) {
           {
             type: "input_text",
             text:
-              "Return strict JSON only with keys: summary (string), key_points (string[]), recommendations (string[]), answer (string|null), trend ({direction:'up'|'down'|'flat', percent_change:number|null}). " +
-              "Be concise and user-friendly for first-time users. summary must be 1-2 short sentences. key_points must have 3-4 short bullets. recommendations must have 1-2 practical next steps. " +
-              "If a question is provided, answer it directly in `answer` starting with: To answer your question. Avoid jargon, avoid long paragraphs, and keep wording simple."
+              "Return STRICT JSON only (no prose, no markdown fences) with exactly these keys:\n" +
+              "  is_on_topic: boolean — true if the question is about this device's sensor data, alerts, environment, or recommended actions.\n" +
+              "  summary: string — 1-2 short sentences citing at least one specific value+timestamp from facts.\n" +
+              "  answer: string — direct response to the user's question, starting with 'To answer your question'. MUST quote exact numbers and human-readable times from facts.\n" +
+              "  key_points: string[] — 2-4 short bullets, each anchored on a specific fact (e.g. 'Peak last 24h: 30.9 °C at 7:18 PM').\n" +
+              "  actions: { severity: 'critical'|'warning'|'info', text: string }[] — 1-3 prioritized next steps.\n" +
+              "  recommendations: string[] — same texts as actions (for backward compatibility).\n" +
+              "  highlight: { device_id: number, start_iso: string, end_iso: string, reason: string } | null — the chart will mark this time window. Set null only if your answer truly does not reference a specific time range.\n" +
+              "  trend: { direction: 'up'|'down'|'flat', percent_change: number|null } — based on facts.comparison_this_week_vs_last_week.\n" +
+              "Never invent timestamps. Never invent values. Never repeat the same sentence template across responses."
           }
         ]
       },
@@ -1770,6 +2145,11 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
   const userId = Number.parseInt(req.params.userId, 10)
   const deviceId = Number.parseInt(req.params.deviceId, 10)
   const question = String(req.body?.question || "").trim()
+  // The client passes the current chart range so the model can prefer to
+  // highlight inside what the user is already looking at.
+  const viewMode = String(req.body?.view_mode || "").trim() || null
+  const rangeStartIso = String(req.body?.range_start_iso || "").trim() || null
+  const rangeEndIso = String(req.body?.range_end_iso || "").trim() || null
   const questionIntent = classifyQuestionIntent(question)
   if (!Number.isFinite(userId) || !Number.isFinite(deviceId)) {
     return res.status(400).json({ message: "Invalid user id or device id" })
@@ -1777,7 +2157,7 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
 
   try {
     const deviceRes = await query(
-      `SELECT id, name, device_uid
+      `SELECT id, name, device_uid, sensor_type, unit
        FROM devices
        WHERE id = $1 AND user_id = $2
        LIMIT 1`,
@@ -1787,6 +2167,22 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
       return res.status(404).json({ message: "Device not found for user" })
     }
     const device = deviceRes.rows[0]
+
+    // Hard refuse clearly off-topic prompts before doing any DB or AI work.
+    if (classifyOffTopic(question)) {
+      const refusal = buildRefusalInsight(question, friendlyDeviceDisplayName(device.name, device.device_uid))
+      return res.json({
+        device: {
+          id: device.id,
+          name: device.name,
+          label: friendlyDeviceDisplayName(device.name, device.device_uid),
+          device_uid: device.device_uid
+        },
+        question: question || null,
+        insight: refusal,
+        source: "refusal"
+      })
+    }
 
     const latestRes = await query(
       `SELECT value, sensor_type, unit, recorded_at
@@ -1819,6 +2215,62 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
        ORDER BY day_bucket ASC`,
       [device.id]
     )
+    // 90-day daily history powers "how does this week compare" claims; cheap
+    // because it's already a daily aggregate, not raw points.
+    const daily90Res = await query(
+      `SELECT
+         date_trunc('day', recorded_at) AS day_bucket,
+         AVG(value) AS avg_value,
+         MIN(value) AS min_value,
+         MAX(value) AS max_value,
+         COUNT(*)::BIGINT AS samples
+       FROM sensor_readings
+       WHERE device_id = $1
+         AND recorded_at >= NOW() - INTERVAL '90 days'
+       GROUP BY day_bucket
+       ORDER BY day_bucket ASC`,
+      [device.id]
+    )
+    // 12-month monthly history powers year-over-year comparisons (only useful
+    // once the device has >= 13 months of data; we still send it so the model
+    // can answer "we don't have a year of data yet" honestly when needed).
+    const monthly12Res = await query(
+      `SELECT
+         date_trunc('month', recorded_at) AS month_bucket,
+         AVG(value) AS avg_value,
+         MIN(value) AS min_value,
+         MAX(value) AS max_value,
+         COUNT(*)::BIGINT AS samples
+       FROM sensor_readings
+       WHERE device_id = $1
+         AND recorded_at >= NOW() - INTERVAL '24 months'
+       GROUP BY month_bucket
+       ORDER BY month_bucket ASC`,
+      [device.id]
+    )
+    // Fleet snapshot for cross-device questions ("are my basement readings
+    // worse than my attic?"). One row per device with cheap aggregates.
+    const fleetRes = await query(
+      `WITH latest AS (
+         SELECT DISTINCT ON (device_id)
+                device_id, value, sensor_type, unit, recorded_at
+         FROM sensor_readings
+         ORDER BY device_id, recorded_at DESC
+       )
+       SELECT
+         d.id,
+         d.name,
+         d.device_uid,
+         d.sensor_type,
+         d.unit,
+         l.value AS latest_value,
+         l.recorded_at AS latest_recorded_at
+       FROM devices d
+       LEFT JOIN latest l ON l.device_id = d.id
+       WHERE d.user_id = $1
+       ORDER BY d.id ASC`,
+      [userId]
+    )
 
     const latestReading = latestRes.rows[0]
       ? {
@@ -1839,28 +2291,85 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
       max_value: r.max_value !== null ? Number(r.max_value) : null,
       samples: Number.parseInt(r.samples, 10) || 0
     }))
+    const daily90Rows = daily90Res.rows.map((r) => ({
+      day_bucket: r.day_bucket ? new Date(r.day_bucket).toISOString() : null,
+      avg_value: r.avg_value !== null ? Number(r.avg_value) : null,
+      min_value: r.min_value !== null ? Number(r.min_value) : null,
+      max_value: r.max_value !== null ? Number(r.max_value) : null,
+      samples: Number.parseInt(r.samples, 10) || 0
+    }))
+    const monthly12Rows = monthly12Res.rows.map((r) => ({
+      month_bucket: r.month_bucket ? new Date(r.month_bucket).toISOString() : null,
+      avg_value: r.avg_value !== null ? Number(r.avg_value) : null,
+      min_value: r.min_value !== null ? Number(r.min_value) : null,
+      max_value: r.max_value !== null ? Number(r.max_value) : null,
+      samples: Number.parseInt(r.samples, 10) || 0
+    }))
+
+    // Threshold config drives "critical" classification used in facts.
+    const thresholds = await loadThresholdConfig(
+      device.id,
+      device.sensor_type || latestReading?.sensor_type,
+      device.unit || latestReading?.unit
+    )
+
+    // Pre-computed facts the model is required to quote from. Compared to
+    // dumping raw points, this is ~5-10x smaller and ~10x more reliable when
+    // the user asks for specific moments.
+    const facts = buildAgentFacts({
+      device: { ...device, unit: device.unit || latestReading?.unit },
+      thresholds,
+      recentReadings,
+      dailyTrend14d: dailyTrendRows,
+      daily90d: daily90Rows,
+      monthly12m: monthly12Rows
+    })
+
+    // Per-device fleet summary: just enough for cross-device questions.
+    const recentAlerts = alertHistoryByUserId.get(userId) || []
+    const dayMs = 24 * 60 * 60 * 1000
+    const nowMs = Date.now()
+    const fleet = fleetRes.rows.map((row) => {
+      const alerts24h = recentAlerts.filter(
+        (a) =>
+          a.device_id === row.id &&
+          a.recorded_at &&
+          nowMs - new Date(a.recorded_at).getTime() <= dayMs
+      ).length
+      return {
+        device_id: row.id,
+        name: row.name,
+        label: friendlyDeviceDisplayName(row.name, row.device_uid),
+        sensor_type: row.sensor_type || null,
+        unit: row.unit || null,
+        latest_value: row.latest_value !== null ? Number(row.latest_value) : null,
+        latest_recorded_at: row.latest_recorded_at
+          ? new Date(row.latest_recorded_at).toISOString()
+          : null,
+        critical_events_24h: alerts24h,
+        is_current_device: row.id === device.id
+      }
+    })
 
     const context = {
-      device: {
-        id: device.id,
-        name: device.name,
-        label: friendlyDeviceDisplayName(device.name, device.device_uid),
-        device_uid: device.device_uid
+      // What chart the user is currently looking at — helps the model pick a
+      // sensible highlight window.
+      ui_context: {
+        view_mode: viewMode,
+        chart_range_start_iso: rangeStartIso,
+        chart_range_end_iso: rangeEndIso
       },
-      latest_reading: latestReading,
-      recent_readings_sample: recentReadings.slice(-120),
-      daily_trend_14d: dailyTrendRows,
+      facts,
+      fleet,
       computed_metrics: {
         samples_7d: recentReadings.length,
         avg_7d: average(recentReadings.map((r) => r.value)),
         last_24h_avg: average(
           recentReadings
-            .filter((r) => r.recorded_at && Date.now() - new Date(r.recorded_at).getTime() <= 24 * 60 * 60 * 1000)
+            .filter((r) => r.recorded_at && nowMs - new Date(r.recorded_at).getTime() <= dayMs)
             .map((r) => r.value)
         ),
-        recent_alert_count: (alertHistoryByUserId.get(userId) || []).filter(
-          (a) => a.device_id === device.id
-        ).length
+        recent_alert_count: recentAlerts.filter((a) => a.device_id === device.id).length
       },
       conversation_memory: getAiConversation(userId, deviceId)
     }
@@ -1873,22 +2382,33 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
 
     if (questionIntent === "greeting") {
       return res.json({
-        device: context.device,
+        device: {
+          id: device.id,
+          name: device.name,
+          label: facts.device.label,
+          device_uid: device.device_uid
+        },
         question: question || null,
         insight: {
+          is_on_topic: true,
           summary:
-            "I can help interpret this device's sensor data and leak risk in plain language.",
+            "I can interpret this device's sensor data, peaks, alerts, and what to do about them.",
           key_points: [
-            "Ask about trend direction (up/down/stable).",
-            "Ask whether leak risk is increasing this week.",
-            "Ask for a 24-hour action plan based on latest readings."
+            "Ask about a specific time window (\"What was the peak last night?\").",
+            "Ask about trend (\"Is moisture trending up this week?\").",
+            "Ask for action (\"Should I be worried? What should I check?\")."
+          ],
+          actions: [
+            { severity: "info", text: "Try: 'What was the highest reading in the last 24 hours and when?'" },
+            { severity: "info", text: "Try: 'Should I be worried about the trend? What should I check first?'" }
           ],
           recommendations: [
-            "Try: 'Is leak risk increasing this week?'",
-            "Try: 'What changed in the last 24 hours and what should I do next?'"
+            "Try: 'What was the highest reading in the last 24 hours and when?'",
+            "Try: 'Should I be worried about the trend? What should I check first?'"
           ],
+          highlight: null,
           answer:
-            "Hi! Ask me a data question about this device and I will analyze the readings, trend, risk, and next actions.",
+            "Hi! Ask me a data question about this device and I'll cite specific readings, mark the relevant time range on the chart, and tell you what to do next.",
           trend: { direction: "flat", percent_change: null }
         },
         source: "openai"
@@ -1924,7 +2444,12 @@ app.post("/api/users/:userId/devices/:deviceId/agent/insights", async (req, res)
     })
 
     return res.json({
-      device: context.device,
+      device: {
+        id: device.id,
+        name: device.name,
+        label: facts.device.label,
+        device_uid: device.device_uid
+      },
       question: question || null,
       insight: normalizedInsight,
       analytics,
